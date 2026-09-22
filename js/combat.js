@@ -1,6 +1,6 @@
 import * as THREE from 'three';
-import { isSolid } from './voxel.js?v=lobby15';
-import { CombatPhysics, pickRandomSpawn } from './physics.js?v=lobby15';
+import { isSolid } from './voxel.js?v=lobby16';
+import { CombatPhysics, pickRandomSpawn } from './physics.js?v=lobby16';
 
 /**
  * AK：联机打玩家；单机/联机本地弹道可打动物（PvE）

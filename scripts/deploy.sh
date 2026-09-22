@@ -5,12 +5,14 @@ set -euo pipefail
 ROOT="${DEPLOY_ROOT:-/www/wwwroot/mc.aikex.ink}"
 cd "$ROOT"
 
-# Actions runner 与站点目录属主可能不同
-git config --global --add safe.directory "$ROOT" 2>/dev/null || true
+# Actions runner / 属主不一致时绕过 dubious ownership（不依赖 HOME/.gitconfig）
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=safe.directory
+export GIT_CONFIG_VALUE_0="$ROOT"
 
 echo "[deploy] $(date -Is) pull…"
-git fetch origin main
-git reset --hard origin/main
+git -c safe.directory="$ROOT" fetch origin main
+git -c safe.directory="$ROOT" reset --hard origin/main
 
 cd "$ROOT/server"
 if [[ ! -f ecosystem.config.cjs ]]; then

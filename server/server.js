@@ -687,7 +687,14 @@ wss.on('connection', (ws) => {
       if (!shot) return;
       room.broadcast({ t: 'shot', by: peer.id, dimension: peer.dimension,
         origin: shot.origin, direction: shot.direction, distance: shot.distance });
-      if (shot.target) room.broadcast({ t: 'combat', ...combat.state(shot.target), by: peer.id });
+      if (shot.target) {
+        room.broadcast({
+          t: 'combat',
+          ...combat.state(shot.target),
+          by: peer.id,
+          ...(shot.knock || {}),
+        });
+      }
       return;
     }
     // Environmental damage remains client simulated, as in the original game.

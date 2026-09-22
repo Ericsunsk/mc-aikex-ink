@@ -4,21 +4,21 @@
  */
 
 import * as THREE from 'three';
-import { Combat } from './combat.js?v=lobby14';
+import { Combat } from './combat.js?v=lobby15';
 import {
   World, Chunk, BlockType, BlockNames, isSolid, Dim,
   CHUNK_SIZE, CHUNK_HEIGHT, RENDER_DISTANCE, getBlockColor, getBreakDrop,
   isMobileDevice, getRenderDistance,
-} from './voxel.js?v=lobby14';
-import { AnimalManager } from './animals.js?v=lobby14';
-import { SaveManager } from './save.js?v=lobby14';
-import { NetClient, RemotePlayers } from './net.js?v=lobby14';
-import { Inventory } from './inventory.js?v=lobby14';
-import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby14';
-import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby14';
-import { EnderDragon } from './dragon.js?v=lobby14';
-import { AdminPanel } from './admin-panel.js?v=lobby14';
-import { buildStructure } from './structures.js?v=lobby14';
+} from './voxel.js?v=lobby15';
+import { AnimalManager } from './animals.js?v=lobby15';
+import { SaveManager } from './save.js?v=lobby15';
+import { NetClient, RemotePlayers } from './net.js?v=lobby15';
+import { Inventory } from './inventory.js?v=lobby15';
+import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby15';
+import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby15';
+import { EnderDragon } from './dragon.js?v=lobby15';
+import { AdminPanel } from './admin-panel.js?v=lobby15';
+import { buildStructure } from './structures.js?v=lobby15';
 import { apiUrl } from './config.js';
 
 /* ============================================
@@ -62,6 +62,7 @@ class Player {
     this._bob = 0;
     this._landPunch = 0;
     this._sprinting = false;
+    this.knockVelocity = new THREE.Vector3(0, 0, 0);
 
     // 交互参数
     this.reachDistance = 7;
@@ -133,9 +134,19 @@ class Player {
     this._sprinting = wantSprint && this.onGround && moveDir.lengthSq() > 0;
     const speed = this.moveSpeed * (this._sprinting ? this.sprintMul : 1) * (this.adminFly ? 1.8 : 1);
 
-    // 水平移动
-    this.velocity.x = moveDir.x * speed;
-    this.velocity.z = moveDir.z * speed;
+    // 水平移动 + 击退
+    this.velocity.x = moveDir.x * speed + this.knockVelocity.x;
+    this.velocity.z = moveDir.z * speed + this.knockVelocity.z;
+    if (this.knockVelocity.y !== 0 && !this.adminFly) {
+      this.velocity.y += this.knockVelocity.y;
+      this.knockVelocity.y = 0;
+    }
+    this.knockVelocity.x *= Math.exp(-dt * 6);
+    this.knockVelocity.z *= Math.exp(-dt * 6);
+    if (Math.hypot(this.knockVelocity.x, this.knockVelocity.z) < 0.05) {
+      this.knockVelocity.x = 0;
+      this.knockVelocity.z = 0;
+    }
 
     // 管理飞行：空格上升，Shift 下降，无重力
     if (this.adminFly) {
@@ -2622,7 +2633,7 @@ class Game {
 
     }
 
-    this.combat?.tick();
+    this.combat?.tick(dt);
     if (this.player) this.player._armedLook = !!this.combat?.armed;
     this._tickFov(dt);
     if (this.remotes) this.remotes.update(dt, this.camera, this.dimension);

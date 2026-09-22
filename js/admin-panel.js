@@ -289,9 +289,9 @@ export class AdminPanel {
   doPreset(name) {
     if (!this.authed) return;
     const map = {
-      spawn: { x: 5.4, y: 19, z: 22.6, dim: 'overworld' },
-      portal: { x: 10, y: 19, z: 18, dim: 'overworld' },
-      nether: { x: 8, y: 16, z: 8, dim: 'nether' },
+      spawn: { x: 7.5, y: 19, z: 8.5, dim: 'overworld' },
+      portal: { x: 7.5, y: 19, z: 5.5, dim: 'overworld' },
+      nether: { x: 21.5, y: 15, z: 9.5, dim: 'nether' },
       end: { x: 0, y: 24, z: 0, dim: 'end' },
     };
     const p = map[name];

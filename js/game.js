@@ -8,16 +8,16 @@ import {
   World, Chunk, BlockType, BlockNames, isSolid, Dim,
   CHUNK_SIZE, CHUNK_HEIGHT, RENDER_DISTANCE, getBlockColor, getBreakDrop,
   isMobileDevice, getRenderDistance,
-} from './voxel.js?v=lobby10';
-import { AnimalManager } from './animals.js?v=lobby10';
-import { SaveManager } from './save.js?v=lobby10';
-import { NetClient, RemotePlayers } from './net.js?v=lobby10';
-import { Inventory } from './inventory.js?v=lobby10';
-import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby10';
-import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby10';
-import { EnderDragon } from './dragon.js?v=lobby10';
-import { AdminPanel } from './admin-panel.js?v=lobby10';
-import { buildStructure } from './structures.js?v=lobby10';
+} from './voxel.js?v=lobby12';
+import { AnimalManager } from './animals.js?v=lobby12';
+import { SaveManager } from './save.js?v=lobby12';
+import { NetClient, RemotePlayers } from './net.js?v=lobby12';
+import { Inventory } from './inventory.js?v=lobby12';
+import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby12';
+import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby12';
+import { EnderDragon } from './dragon.js?v=lobby12';
+import { AdminPanel } from './admin-panel.js?v=lobby12';
+import { buildStructure } from './structures.js?v=lobby12';
 import { apiUrl } from './config.js';
 
 /* ============================================
@@ -842,12 +842,13 @@ class Game {
       this.player.yaw = p.yaw || 0;
       this.player.pitch = typeof p.pitch === 'number' ? p.pitch : -0.3;
     } else {
-      this._spawnX = 5.4;
-      this._spawnZ = 22.6;
-      this._spawnY = -27.0;
+      // 出生在平坦文字区地面上，正对地狱门（门在 z≈4，朝 -Z 看）
+      this._spawnX = 7.5;
+      this._spawnZ = 8.5;
+      this._spawnY = World.TEXT_GROUND_Y + 1; // 19
       this.player.position.set(this._spawnX, this._spawnY, this._spawnZ);
-      this.player.yaw = 0;
-      this.player.pitch = -0.3;
+      this.player.yaw = 0; // 看向 -Z，正对门
+      this.player.pitch = -0.15;
     }
 
     // 相机保持立墙预览视角，等用户点击开始后再切到玩家视角
@@ -864,21 +865,38 @@ class Game {
     this._updateHotbar();
   }
 
-  /** 主世界出生点旁生成已点燃地狱门 */
+  /** 主世界出生点旁：沙地上已点燃地狱门（可走进） */
   _ensureStarterPortal() {
     if (this.dimension !== Dim.OVERWORLD) return;
-    for (const t of this.world.edits.values()) {
-      if (t === BlockType.PORTAL) return; // 已有门
+    // 正确位置：文字平地 z≈4 的门芯；旧档若门在远处悬空则重建
+    let good = 0;
+    for (const [key, t] of this.world.edits) {
+      if (t !== BlockType.PORTAL) continue;
+      const parts = key.split(',');
+      const wy = +parts[1];
+      const wz = +parts[2];
+      if (wz >= 3 && wz <= 5 && wy >= World.TEXT_GROUND_Y && wy <= World.TEXT_GROUND_Y + 4) good++;
     }
-    // 门框底边贴在沙地 y=18，面向玩家出生点附近
-    const portal = spawnReturnPortal(this.world, 12, World.TEXT_GROUND_Y || 18, 18, 'x');
-    // 重筑受影响区块
-    for (let cx = 0; cx <= 1; cx++) {
-      for (let cz = 1; cz <= 2; cz++) {
-        this._rebuildChunkAt(cx, cz);
+    if (good >= 6) {
+      this._starterPortalPos = { x: 7.5, y: World.TEXT_GROUND_Y + 1, z: 4.5, axis: 'x' };
+      return;
+    }
+
+    const gy = World.TEXT_GROUND_Y;
+    const portal = spawnReturnPortal(this.world, 7.5, gy, 4, 'x');
+    this._rebuildPortalChunks(portal);
+    this._starterPortalPos = portal;
+  }
+
+  /** 重建传送门附近区块 mesh */
+  _rebuildPortalChunks(portal) {
+    const cx0 = Math.floor((portal?.x ?? 8) / CHUNK_SIZE);
+    const cz0 = Math.floor((portal?.z ?? 4) / CHUNK_SIZE);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        this._rebuildChunkAt(cx0 + dx, cz0 + dz);
       }
     }
-    this._starterPortalPos = portal;
   }
 
   _rebuildChunkAt(cx, cz) {
@@ -1335,8 +1353,9 @@ class Game {
       this._showSaveToast('门框不对：内空宽2高3，外圈黑曜石');
       return;
     }
+    this._rebuildPortalChunks({ x: lit.x + 1.5, y: lit.y + 1, z: lit.z });
     this._dirtySinceSave = true;
-    this._showSaveToast('地狱门已点燃！走进紫色门');
+    this._showSaveToast('地狱门已点燃！走进紫色方块，站约1秒');
   }
 
   _attackMob(robot) {
@@ -1475,27 +1494,21 @@ class Game {
 
     // 回程门 / 末影龙
     if (dim === Dim.NETHER) {
-      const hasPortal = [...this.world.edits.values()].includes(BlockType.PORTAL);
-      if (!hasPortal) {
-        // 回程门放在 x=20，避开中央末地神殿
-        spawnReturnPortal(this.world, 20, 14, 8, 'x');
-        const key = this.world.chunkKey(1, 0);
-        let ch = this.world.chunks.get(key);
-        if (!ch) {
-          ch = this._createChunk(1, 0);
-          if (ch.mesh) this.scene.add(ch.mesh);
-          if (ch.waterMesh) this.scene.add(ch.waterMesh);
-        } else {
-          if (ch.mesh) this.scene.remove(ch.mesh);
-          if (ch.waterMesh) this.scene.remove(ch.waterMesh);
-          this.world.generateChunkData(ch);
-          this.world.applyEdits(ch);
-          ch.buildMesh((wx, wy, wz) => this.world.getBlock(wx, wy, wz), this.world.material, this.world.waterMaterial);
-          if (ch.mesh) this.scene.add(ch.mesh);
-          if (ch.waterMesh) this.scene.add(ch.waterMesh);
-        }
+      const FLOOR = 14;
+      let hasReturn = false;
+      for (const [key, t] of this.world.edits) {
+        if (t !== BlockType.PORTAL) continue;
+        const wx = +key.split(',')[0];
+        if (wx >= 18) { hasReturn = true; break; }
       }
-      this.player.position.set(21, 16, 8);
+      if (!hasReturn) {
+        const portal = spawnReturnPortal(this.world, 21, FLOOR, 8, 'x');
+        this._rebuildPortalChunks(portal);
+      }
+      // 回程门内侧，面朝中央末地台（-X）
+      this.player.position.set(21.5, FLOOR + 1, 9.5);
+      this.player.yaw = Math.PI / 2;
+      this.player.pitch = -0.1;
     }
     if (dim === Dim.END && !this._dragonKilled) {
       this._dragon = new EnderDragon(this.scene, 0, 28, 0);
@@ -1505,9 +1518,15 @@ class Game {
     this.animalManager.spawnCenter.set(this.player.position.x, 0, this.player.position.z);
     if (!this._online) this.animalManager.spawnAnimals(dim);
 
-    this._portalTimer = -2; // 防立刻回传
+    this._portalTimer = -2.5; // 防立刻回传
     this._updateDimHud();
-    this._showSaveToast(dim === Dim.NETHER ? '已进入地狱 · 中央紫色台通往末地' : dim === Dim.END ? '末地 · 击败末影龙！' : '回到主世界');
+    this._showSaveToast(
+      dim === Dim.NETHER
+        ? '已进入地狱 · 回程门在身后 · 中央紫色台→末地'
+        : dim === Dim.END
+          ? '末地 · 击败末影龙！'
+          : '回到主世界'
+    );
   }
 
   _updateDimHud() {
@@ -1526,30 +1545,56 @@ class Game {
     if (!this.isRunning) return;
     if (this._portalTimer < 0) {
       this._portalTimer += dt;
+      this._setPortalCharge(0);
       return;
     }
     if (!standingInPortal(this.world, this.player.position.x, this.player.position.y, this.player.position.z)) {
       this._portalTimer = 0;
+      this._setPortalCharge(0);
       return;
     }
     this._portalTimer += dt;
-    if (this._portalTimer < 1.2) return;
+    const need = 1.0;
+    this._setPortalCharge(Math.min(1, this._portalTimer / need));
+    if (this._portalTimer < need) return;
     this._portalTimer = -3;
+    this._setPortalCharge(0);
 
-    // 路由：主世界↔地狱；地狱中央神殿门→末地；末地门→主世界
+    // 路由：主世界↔地狱；地狱中央台→末地；末地门→主世界
     if (this.dimension === Dim.OVERWORLD) {
       this._switchDimension(Dim.NETHER);
     } else if (this.dimension === Dim.NETHER) {
-      // 在神殿平台上（y>=15 且靠近原点）→ 末地，否则回主世界
       const p = this.player.position;
-      if (Math.hypot(p.x - 8, p.z - 8) < 6 && p.y >= 14) {
+      // 中央末地台（约 6~9,15,6~9）→ 末地；回程门（x≥18）→ 主世界
+      if (p.x >= 5 && p.x <= 11 && p.z >= 5 && p.z <= 11 && p.y >= 14) {
         this._switchDimension(Dim.END);
       } else {
-        this._switchDimension(Dim.OVERWORLD);
+        this._switchDimension(Dim.OVERWORLD, this._starterPortalPos
+          ? { x: this._starterPortalPos.x, y: this._starterPortalPos.y, z: (this._starterPortalPos.z || 4) + 3 }
+          : null);
       }
     } else {
-      this._switchDimension(Dim.OVERWORLD);
+      this._switchDimension(Dim.OVERWORLD, this._starterPortalPos
+        ? { x: this._starterPortalPos.x, y: this._starterPortalPos.y, z: (this._starterPortalPos.z || 4) + 3 }
+        : null);
     }
+  }
+
+  _setPortalCharge(t) {
+    let el = document.getElementById('portalCharge');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'portalCharge';
+      el.innerHTML = '<div class="portal-charge-bar"><i></i></div><span>穿越中…</span>';
+      document.body.appendChild(el);
+    }
+    if (t <= 0) {
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = 'flex';
+    const bar = el.querySelector('i');
+    if (bar) bar.style.width = `${(t * 100) | 0}%`;
   }
 
   _ensureHud() {
@@ -1581,14 +1626,12 @@ class Game {
       this._stopRoomPoll();
       this.isRunning = true;
       this.ui.startScreen.style.display = 'none';
-      // 出生在地狱门前，方便直接去打龙
-      if (this._starterPortalPos && this.dimension === Dim.OVERWORLD) {
-        this.player.position.set(
-          this._starterPortalPos.x - 2.5,
-          (World.TEXT_GROUND_Y || 18) + 1.1,
-          this._starterPortalPos.z
-        );
-        this.player.yaw = -Math.PI / 2; // 面朝门
+      // 新开局：站在地狱门正前方（门面朝 ±Z）；读档保持存档坐标
+      if (this._starterPortalPos && this.dimension === Dim.OVERWORLD && !this._saveData) {
+        const p = this._starterPortalPos;
+        this.player.position.set(p.x, World.TEXT_GROUND_Y + 1.1, (p.z || 4) + 3.5);
+        this.player.yaw = 0;
+        this.player.pitch = -0.1;
       }
       this.camera.position.set(
         this.player.position.x,
@@ -1614,7 +1657,7 @@ class Game {
       }
       this._startAutosave();
       this._persist('enter');
-      this._showSaveToast('紫色地狱门在眼前 → 走进去打龙！');
+      this._showSaveToast('正前方紫色门 → 走进去站1秒进地狱');
     };
 
     if (btnContinue) {

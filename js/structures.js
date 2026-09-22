@@ -1,8 +1,8 @@
 /**
  * 管理结构预设：地狱门 / 小木屋 / 末地平台
  */
-import { BlockType } from './voxel.js?v=lobby10';
-import { spawnReturnPortal } from './portals.js?v=lobby10';
+import { BlockType } from './voxel.js?v=lobby12';
+import { spawnReturnPortal } from './portals.js?v=lobby12';
 
 export function buildStructure(world, id, cx, cy, cz) {
   const x = Math.floor(cx);

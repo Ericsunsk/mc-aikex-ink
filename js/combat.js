@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { Mage } from './mage.js?v=mage2';
-import { isSolid } from './voxel.js?v=mage2';
-import { CombatPhysics, pickRandomSpawn } from './physics.js?v=mage2';
+import { Mage } from './mage.js?v=mage3';
+import { isSolid } from './voxel.js?v=mage3';
+import { CombatPhysics, pickRandomSpawn } from './physics.js?v=mage3';
 
 /**
  * AK：联机打玩家；单机/联机本地弹道可打动物（PvE）

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { isSolid } from './voxel.js?v=mage2';
+import { isSolid } from './voxel.js?v=mage3';
 
 export class Mage {
   constructor(game) {

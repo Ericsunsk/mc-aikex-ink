@@ -5,6 +5,9 @@ set -euo pipefail
 ROOT="${DEPLOY_ROOT:-/www/wwwroot/mc.aikex.ink}"
 cd "$ROOT"
 
+# Actions runner 与站点目录属主可能不同
+git config --global --add safe.directory "$ROOT" 2>/dev/null || true
+
 echo "[deploy] $(date -Is) pull…"
 git fetch origin main
 git reset --hard origin/main

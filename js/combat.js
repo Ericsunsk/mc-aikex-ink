@@ -21,9 +21,9 @@ export class Combat {
     fire.onpointerdown = e => { e.preventDefault(); fire.setPointerCapture(e.pointerId); this.held = true; };
     fire.onpointerup = fire.onpointercancel = fire.onlostpointercapture = () => { this.held = false; };
     document.addEventListener('keydown', e => {
-      if (e.code === 'KeyQ' && !e.repeat && game.isRunning && !/INPUT|TEXTAREA/.test(e.target.tagName)) this.toggle();
+      if (e.code === 'KeyQ' && !e.repeat && game._controlsActive() && !/INPUT|TEXTAREA/.test(e.target.tagName)) this.toggle();
     });
-    document.addEventListener('mousedown', e => { if (e.button === 0 && game.isPointerLocked) this.held = true; });
+    document.addEventListener('mousedown', e => { if (e.button === 0 && game._controlsActive() && (game.isPointerLocked || e.target === game.canvas)) this.held = true; });
     document.addEventListener('mouseup', e => { if (e.button === 0) this.held = false; });
     document.addEventListener('pointerlockchange', () => { this.held = false; });
     window.addEventListener('blur', () => { this.held = false; });
@@ -93,12 +93,13 @@ export class Combat {
   }
 
   tick() {
-    const g = this.game, active = g.isRunning && (g.isPointerLocked || g.isMobile);
+    const g = this.game, active = g._controlsActive();
     this.panel.style.display = active ? 'flex' : 'none';
     this.gun.visible = active && this.armed && g.player.hp > 0;
     this.gun.position.z += (-.55 - this.gun.position.z) * .3;
     this.status.textContent = g.player.hp <= 0 ? `已阵亡 · ${Math.max(1, Math.ceil((this.deadUntil - Date.now()) / 1000))} 秒后重生` :
       this.armed ? 'AK · 按住左键/开火连射 · Q 收枪' : 'Q 装备 AK · 联机可互射';
+    if (g._fallbackActive) this.status.textContent += ' · WASD 移动 / 按住右键拖动视角 / Esc 暂停';
     if (!active) this.held = false;
     if (active && this.held) this.shoot();
     if (g._online && g.player.hp !== this.lastHp) {

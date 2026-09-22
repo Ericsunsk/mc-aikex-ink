@@ -73,3 +73,5 @@ MIT — 见 [LICENSE](LICENSE)
 新增客户端消息 shoot（direction、distance）和 vitals（本地环境伤害/食物回血 delta）；新增服务器广播 shot（弹道）和 combat（hp、deadUntil、respawn 等）。joined/sync 附带 self，玩家快照与 move 附带生命值和 dimension。前后端需一起更新。
 
 服务器控制 PvP 伤害、射速、最近玩家命中、死亡与重生。地形遮挡距离、玩家移动和环境生命值变化仍来自客户端；这不是完整的反作弊系统，修改客户端可以伪造这些数据。服务器尚未模拟体素地形或验证食物消耗。
+
+鼠标锁定兼容：若浏览器拒绝 Pointer Lock，自动使用 WASD 移动、按住右键拖动视角、左键攻击的兼容模式；右键单击仍可放置，Esc 暂停，失焦清空按键。内置浏览器已实测移动、AK 显示、暂停和继续。

@@ -25,3 +25,11 @@
 ## 本地联调
 
 静态页用 Live Server / `npx serve`；`server` 目录 `npm i && node server.js`。
+
+## 邀请另外两人（仓库 Owner 操作）
+
+1. 打开 https://github.com/aiyangdie/mc-aikex-ink/settings/access
+2. **Add people** → 输入对方 GitHub 用户名 → 权限选 **Write**
+3. 对方邮箱点 Accept 后即可 `git clone` / 提 PR
+
+上线：合并进 `main` 后约 30 秒，本机 Actions runner 会自动 `git pull` + `pm2 reload`。

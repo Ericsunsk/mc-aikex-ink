@@ -1,0 +1,18 @@
+module.exports = {
+  apps: [{
+    name: 'mc-ws',
+    script: 'server.js',
+    cwd: __dirname,
+    exec_mode: 'fork',
+    instances: 1,
+    autorestart: true,
+    max_memory_restart: '200M',
+    env: {
+      PORT: '3040',
+      HOST: '127.0.0.1',
+      NODE_ENV: 'production',
+      // 站长管理密钥：改成你自己的，不要提交真实值到 Git
+      MC_OWNER_KEY: 'change-me-owner-key',
+    },
+  }],
+};

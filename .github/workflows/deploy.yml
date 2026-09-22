@@ -1,0 +1,14 @@
+# 推送到 main → 生产机 self-hosted runner 自动上线
+name: Deploy production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, mc-prod]
+    steps:
+      - name: Pull main and reload PM2
+        run: bash /www/wwwroot/mc.aikex.ink/scripts/deploy.sh

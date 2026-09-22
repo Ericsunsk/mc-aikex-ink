@@ -1,0 +1,327 @@
+/**
+ * 联机客户端：房间码建房/加入，同步方块与玩家位置
+ */
+export class NetClient {
+  constructor() {
+    this.ws = null;
+    this.room = null;
+    this.id = null;
+    this.color = null;
+    this.connected = false;
+    this._handlers = {};
+    this._moveAcc = 0;
+    this._pending = null;
+  }
+
+  on(event, fn) {
+    this._handlers[event] = fn;
+  }
+
+  _emit(event, data) {
+    const fn = this._handlers[event];
+    if (fn) fn(data);
+  }
+
+  connect() {
+    if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) {
+      return Promise.resolve();
+    }
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = `${proto}://${location.host}/ws`;
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(url);
+      this.ws = ws;
+      const timer = setTimeout(() => {
+        try { ws.close(); } catch { /* */ }
+        reject(new Error('连接超时'));
+      }, 8000);
+
+      ws.onopen = () => {
+        clearTimeout(timer);
+        this.connected = true;
+        resolve();
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error('无法连接联机服务'));
+      };
+      ws.onclose = () => {
+        this.connected = false;
+        this.room = null;
+        if (this._pending) {
+          this._pending.reject(new Error('连接已断开'));
+          this._pending = null;
+        }
+        this._emit('close');
+      };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        this._onMsg(msg);
+      };
+    });
+  }
+
+  _send(obj) {
+    if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(obj));
+  }
+
+  _onMsg(msg) {
+    if (!msg || !msg.t) return;
+    if (msg.t === 'err') {
+      if (this._pending) {
+        this._pending.reject(new Error(msg.msg || '错误'));
+        this._pending = null;
+      }
+      this._emit('err', msg.msg || '错误');
+      return;
+    }
+    if (msg.t === 'joined') {
+      this.room = msg.room;
+      this.id = msg.id;
+      this.color = msg.color;
+      if (this._pending) {
+        this._pending.resolve(msg);
+        this._pending = null;
+      }
+      this._emit('joined', msg);
+      return;
+    }
+    if (msg.t === 'sync') {
+      if (this._pending) {
+        this._pending.resolve(msg);
+        this._pending = null;
+      }
+      this._emit('sync', msg);
+      return;
+    }
+    if (msg.t === 'block') this._emit('block', msg);
+    else if (msg.t === 'move') this._emit('move', msg);
+    else if (msg.t === 'peer') this._emit('peer', msg);
+    else if (msg.t === 'bye') this._emit('bye', msg);
+    else if (msg.t === 'mob') this._emit('mob', msg);
+    else if (msg.t === 'mobs') this._emit('mobs', msg);
+    else if (msg.t === 'mob_die') this._emit('mob_die', msg);
+    else if (msg.t === 'admin_ok') {
+      if (this._pending) {
+        this._pending.resolve(msg);
+        this._pending = null;
+      }
+      this._emit('admin_ok', msg);
+    }
+    else if (msg.t === 'admin_spawn') this._emit('admin_spawn', msg);
+  }
+
+  async adminAuth(key, name = '') {
+    await this.connect();
+    return this._request({ t: 'admin_auth', key, name });
+  }
+
+  async adminCmd(payload) {
+    await this.connect();
+    return this._request({ t: 'admin_cmd', ...payload });
+  }
+
+  /** 拉取房间权威快照（edits + players + mobs） */
+  async sync() {
+    if (!this.room) throw new Error('未在房间内');
+    return this._request({ t: 'sync' });
+  }
+
+  sendHit(id, dmg = 3) {
+    if (!this.room) return;
+    this._send({ t: 'hit', id, dmg: dmg | 0 });
+  }
+
+  async create(name, editsArr, title) {
+    await this.connect();
+    return this._request({
+      t: 'create',
+      name,
+      title: title || undefined,
+      edits: editsArr || [],
+    });
+  }
+
+  async join(room, name) {
+    await this.connect();
+    return this._request({ t: 'join', room: String(room).toUpperCase().trim(), name });
+  }
+
+  _request(payload) {
+    return new Promise((resolve, reject) => {
+      if (this._pending) {
+        reject(new Error('请等待上一次操作完成'));
+        return;
+      }
+      this._pending = { resolve, reject };
+      this._send(payload);
+      setTimeout(() => {
+        if (this._pending && this._pending.reject === reject) {
+          this._pending = null;
+          reject(new Error('服务器无响应'));
+        }
+      }, 8000);
+    });
+  }
+
+  sendBlock(x, y, z, b) {
+    if (!this.room) return;
+    this._send({ t: 'block', x: x | 0, y: y | 0, z: z | 0, b: b | 0 });
+  }
+
+  tickMove(dt, player) {
+    if (!this.room) return;
+    this._moveAcc += dt;
+    if (this._moveAcc < 0.08) return;
+    this._moveAcc = 0;
+    const p = player.position;
+    this._send({
+      t: 'move',
+      x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
+      yaw: +player.yaw.toFixed(3), pitch: +player.pitch.toFixed(3),
+    });
+  }
+
+  /** 拉取公开房间列表（真实在线人） */
+  static async fetchRooms() {
+    const r = await fetch(`/api/rooms?t=${Date.now()}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`房间列表失败 HTTP ${r.status}`);
+    const data = await r.json();
+    if (!data || !data.ok || !Array.isArray(data.rooms)) throw new Error('房间数据异常');
+    return data.rooms;
+  }
+
+  disconnect() {
+    this.stopHeartbeat();
+    if (this.ws) {
+      try { this.ws.close(); } catch { /* */ }
+      this.ws = null;
+    }
+    this.connected = false;
+    this.room = null;
+    this._pending = null;
+  }
+
+  startHeartbeat() {
+    this.stopHeartbeat();
+    this._hb = setInterval(() => {
+      if (this.ws && this.ws.readyState === 1) this._send({ t: 'ping' });
+    }, 12000);
+  }
+
+  stopHeartbeat() {
+    if (this._hb) {
+      clearInterval(this._hb);
+      this._hb = null;
+    }
+  }
+}
+
+/** 远端玩家简易体素人偶 */
+export class RemotePlayers {
+  constructor(scene, THREE) {
+    this.scene = scene;
+    this.THREE = THREE;
+    this.map = new Map();
+    this._labelRoot = null;
+    this._tmp = new THREE.Vector3();
+  }
+
+  _ensureLabelRoot() {
+    if (this._labelRoot) return this._labelRoot;
+    const el = document.createElement('div');
+    el.id = 'remoteLabels';
+    document.body.appendChild(el);
+    this._labelRoot = el;
+    return el;
+  }
+
+  upsert(info) {
+    const THREE = this.THREE;
+    let entry = this.map.get(info.id);
+    if (!entry) {
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(0.55, 1.2, 0.35),
+        new THREE.MeshLambertMaterial({ color: info.color || 0x64b5f6 })
+      );
+      body.position.y = 0.7;
+      const head = new THREE.Mesh(
+        new THREE.BoxGeometry(0.4, 0.4, 0.4),
+        new THREE.MeshLambertMaterial({ color: 0xffe0b2 })
+      );
+      head.position.y = 1.5;
+      group.add(body);
+      group.add(head);
+      this.scene.add(group);
+
+      const label = document.createElement('div');
+      label.className = 'remote-label';
+      label.textContent = info.name || '玩家';
+      this._ensureLabelRoot().appendChild(label);
+
+      entry = {
+        mesh: group, label, body,
+        target: { x: 0, y: 0, z: 0, yaw: 0 },
+        _inited: false,
+      };
+      this.map.set(info.id, entry);
+    }
+    if (info.name) entry.label.textContent = info.name;
+    if (info.color != null && entry.body?.material?.color) {
+      entry.body.material.color.setHex(info.color);
+    }
+    if (info.x != null) {
+      entry.target.x = info.x;
+      entry.target.y = info.y;
+      entry.target.z = info.z;
+      entry.target.yaw = info.yaw || 0;
+      if (!entry._inited) {
+        entry.mesh.position.set(info.x, info.y, info.z);
+        entry.mesh.rotation.y = info.yaw || 0;
+        entry._inited = true;
+      }
+    }
+  }
+
+  remove(id) {
+    const entry = this.map.get(id);
+    if (!entry) return;
+    this.scene.remove(entry.mesh);
+    entry.mesh.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) o.material.dispose();
+    });
+    entry.label?.parentNode?.removeChild(entry.label);
+    this.map.delete(id);
+  }
+
+  clear() {
+    for (const id of [...this.map.keys()]) this.remove(id);
+  }
+
+  update(dt, camera) {
+    const THREE = this.THREE;
+    for (const entry of this.map.values()) {
+      const m = entry.mesh;
+      const t = entry.target;
+      const k = Math.min(1, dt * 12);
+      m.position.x += (t.x - m.position.x) * k;
+      m.position.y += (t.y - m.position.y) * k;
+      m.position.z += (t.z - m.position.z) * k;
+      m.rotation.y = t.yaw;
+
+      const v = this._tmp.set(m.position.x, m.position.y + 2.0, m.position.z);
+      v.project(camera);
+      const x = (v.x * 0.5 + 0.5) * window.innerWidth;
+      const y = (-v.y * 0.5 + 0.5) * window.innerHeight;
+      if (v.z > 1) {
+        entry.label.style.display = 'none';
+      } else {
+        entry.label.style.display = 'block';
+        entry.label.style.transform = `translate(${x}px,${y}px) translate(-50%,-100%)`;
+      }
+    }
+  }
+}

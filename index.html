@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="description" content="像素方块世界 - 单机存档 / 真实联机房间" />
+  <title>像素方块世界</title>
+  <link rel="stylesheet" href="/styles/main.css?v=lobby10" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div id="crosshair">+</div>
+  <div id="selectedBlockName">草地</div>
+  <div id="hotbar"></div>
+  <div id="blockHighlight"></div>
+  <div id="debugInfo"></div>
+
+  <div id="controlsPanel" class="desktop-only">
+    <div class="controls-trigger">?</div>
+    <div class="controls-body">
+      <div class="control-row"><span class="key">W A S D</span><span>移动</span></div>
+      <div class="control-row"><span class="key">鼠标</span><span>视角</span></div>
+      <div class="control-row"><span class="key">左键</span><span>攻击 / 破坏</span></div>
+      <div class="control-row"><span class="key">右键</span><span>放置（耗背包）</span></div>
+      <div class="control-row"><span class="key">`</span><span>管理面板</span></div>
+      <div class="control-row"><span class="key">G</span><span>点燃地狱门</span></div>
+      <div class="control-row"><span class="key">C</span><span>木头→木板</span></div>
+      <div class="control-row"><span class="key">F</span><span>吃肉回血</span></div>
+    </div>
+  </div>
+
+  <div id="loadingBar">
+    <div class="loading-text">生成世界中...</div>
+    <div class="loading-progress"><div class="loading-fill" id="loadingFill"></div></div>
+  </div>
+
+  <div id="pauseScreen">
+    <div class="pause-text">暂停</div>
+    <div id="pauseRoomInfo" class="pause-room" style="display:none"></div>
+    <div class="pause-actions">
+      <button type="button" id="btnResume" class="game-btn primary">继续游戏</button>
+      <button type="button" id="btnSave" class="game-btn">保存进度</button>
+    </div>
+    <div class="pause-hint">点击空白处继续 · Shift+F5 快捷保存</div>
+    <div id="saveToast" class="save-toast"></div>
+  </div>
+
+  <!-- 开始大厅 -->
+  <div id="startScreen">
+    <div class="lobby">
+      <header class="lobby-head">
+        <h1 class="start-title">像素方块世界</h1>
+        <p class="start-subtitle">VOXEL · 地狱门 · 末影龙 · 畜牧建造</p>
+      </header>
+
+      <div class="lobby-grid">
+        <!-- 左：单机 -->
+        <section class="lobby-card" id="soloCard">
+          <h2 class="lobby-h">单机</h2>
+          <p class="lobby-desc">进度保存在本机浏览器</p>
+          <div id="saveMeta" class="save-meta" style="display:none"></div>
+          <div class="lobby-actions">
+            <button type="button" id="btnContinue" class="game-btn primary" style="display:none">继续游戏</button>
+            <button type="button" id="btnNewGame" class="game-btn">开始游戏</button>
+          </div>
+        </section>
+
+        <!-- 中：在线房间列表 -->
+        <section class="lobby-card lobby-card-wide" id="roomsCard">
+          <div class="lobby-h-row">
+            <h2 class="lobby-h">在线房间</h2>
+            <div class="lobby-h-tools">
+              <span id="serviceStatus" class="service-status">检测中…</span>
+              <button type="button" id="btnRefreshRooms" class="game-btn tiny ghost" title="刷新">刷新</button>
+            </div>
+          </div>
+          <p class="lobby-desc">有人「创建公开房间」后会出现在这里，点一行即可加入（约 2.5 秒自动刷新）</p>
+          <div id="roomList" class="room-list" aria-live="polite">
+            <div class="room-empty" id="roomEmpty">正在加载房间…</div>
+          </div>
+          <div class="lobby-foot">
+            <span id="roomListMeta" class="muted"></span>
+          </div>
+        </section>
+
+        <!-- 右：建房 / 输码 -->
+        <section class="lobby-card" id="hostCard">
+          <h2 class="lobby-h">联机</h2>
+          <label class="field-label" for="playerNameInput">昵称</label>
+          <input type="text" id="playerNameInput" class="online-input" maxlength="12" placeholder="你的名字" autocomplete="nickname" />
+
+          <label class="field-label" for="roomTitleInput">房间名（建房用）</label>
+          <input type="text" id="roomTitleInput" class="online-input" maxlength="24" placeholder="例如：一起挖矿" />
+
+          <button type="button" id="btnHost" class="game-btn primary block">创建公开房间</button>
+
+          <div id="waitingPanel" class="waiting-panel" style="display:none">
+            <div class="waiting-title">房间已公开</div>
+            <div id="waitingTitle" class="waiting-name"></div>
+            <div class="waiting-code-row">
+              房间码 <b id="waitingCode"></b>
+              <button type="button" id="btnCopyWaiting" class="game-btn tiny">复制</button>
+            </div>
+            <div id="waitingPlayers" class="waiting-players">在线 1 人</div>
+            <p class="waiting-hint">其他人现在应能在中间列表看到此房。等好友加入后点进入。</p>
+            <button type="button" id="btnEnterRoom" class="game-btn primary block">进入游戏</button>
+            <button type="button" id="btnCancelHost" class="game-btn block ghost">关闭房间</button>
+          </div>
+
+          <div class="or-sep">或输入房间码</div>
+          <div class="online-row">
+            <input type="text" id="roomCodeInput" class="online-input code" maxlength="6" placeholder="ABCD" autocomplete="off" spellcheck="false" />
+            <button type="button" id="btnJoin" class="game-btn">加入</button>
+          </div>
+          <div id="onlineStatus" class="online-status"></div>
+        </section>
+      </div>
+
+      <details class="lobby-help desktop-only">
+        <summary>操作说明</summary>
+        <div class="controls-info nested">
+          <div class="control-row"><span class="key">W A S D</span><span>移动</span></div>
+          <div class="control-row"><span class="key">鼠标</span><span>视角旋转</span></div>
+          <div class="control-row"><span class="key">左键 / 右键</span><span>攻击破坏 / 放置</span></div>
+          <div class="control-row"><span class="key">G / C / F</span><span>点燃门 / 合成木板 / 吃肉</span></div>
+          <div class="control-row"><span class="key">地狱门</span><span>14黑曜石搭框 → G → 走进去</span></div>
+          <div class="control-row"><span class="key">空格</span><span>跳跃</span></div>
+          <div class="control-row"><span class="key">1-6 / 滚轮</span><span>选方块</span></div>
+          <div class="control-row"><span class="key">ESC</span><span>暂停（自动存档）</span></div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <div id="mobileControls" style="display:none;">
+    <div id="joystickZone"><div id="joystickThumb"></div></div>
+    <div id="actionButtons">
+      <button id="btnJump" class="action-btn">跳</button>
+      <button id="btnBreak" class="action-btn">拆</button>
+      <button id="btnPlace" class="action-btn">放</button>
+    </div>
+    <div id="mobileHotbar"></div>
+  </div>
+
+  <script type="module" src="/js/game.js?v=lobby10"></script>
+</body>
+</html>

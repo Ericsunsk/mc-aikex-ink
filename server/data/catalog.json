@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "mobs": [
+    {
+      "id": "pig",
+      "label": "猪",
+      "kind": "pig",
+      "type": "mob"
+    },
+    {
+      "id": "cow",
+      "label": "牛",
+      "kind": "cow",
+      "type": "mob"
+    },
+    {
+      "id": "chicken",
+      "label": "鸡",
+      "kind": "chicken",
+      "type": "mob"
+    },
+    {
+      "id": "duck",
+      "label": "鸭",
+      "kind": "duck",
+      "type": "mob"
+    },
+    {
+      "id": "deer",
+      "label": "鹿",
+      "kind": "deer",
+      "type": "mob"
+    },
+    {
+      "id": "horse",
+      "label": "马",
+      "kind": "horse",
+      "type": "mob"
+    },
+    {
+      "id": "donkey",
+      "label": "驴",
+      "kind": "donkey",
+      "type": "mob"
+    },
+    {
+      "id": "scout",
+      "label": "地狱机",
+      "kind": "scout",
+      "type": "mob"
+    },
+    {
+      "id": "dragon",
+      "label": "末影龙",
+      "kind": "dragon",
+      "type": "boss"
+    },
+    {
+      "id": "wolf",
+      "label": "狼",
+      "kind": "deer",
+      "type": "mob"
+    }
+  ],
+  "items": [
+    {
+      "id": "dirt",
+      "label": "泥土",
+      "typeId": 2,
+      "type": "block"
+    },
+    {
+      "id": "stone",
+      "label": "石头",
+      "typeId": 3,
+      "type": "block"
+    },
+    {
+      "id": "wood",
+      "label": "木头",
+      "typeId": 5,
+      "type": "block"
+    },
+    {
+      "id": "planks",
+      "label": "木板",
+      "typeId": 15,
+      "type": "block"
+    },
+    {
+      "id": "obsidian",
+      "label": "黑曜石",
+      "typeId": 11,
+      "type": "block"
+    },
+    {
+      "id": "netherrack",
+      "label": "地狱岩",
+      "typeId": 12,
+      "type": "block"
+    },
+    {
+      "id": "end_stone",
+      "label": "末地石",
+      "typeId": 14,
+      "type": "block"
+    },
+    {
+      "id": "pork",
+      "label": "猪肉",
+      "typeId": 100,
+      "type": "item"
+    },
+    {
+      "id": "beef",
+      "label": "牛肉",
+      "typeId": 101,
+      "type": "item"
+    },
+    {
+      "id": "dragon_meat",
+      "label": "龙肉",
+      "typeId": 107,
+      "type": "item"
+    }
+  ],
+  "structures": [
+    {
+      "id": "nether_portal",
+      "label": "地狱门",
+      "type": "preset_structure"
+    },
+    {
+      "id": "cabin",
+      "label": "小木屋",
+      "type": "preset_structure"
+    },
+    {
+      "id": "end_pad",
+      "label": "末地平台",
+      "type": "preset_structure"
+    }
+  ]
+}

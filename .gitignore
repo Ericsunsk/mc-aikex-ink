@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Runtime / secrets (never commit)
+server/data/admins.json
+server/data/admin.log
+server/data/rooms.json
+server/data/rooms.json.tmp
+server/ecosystem.config.cjs
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.swp
+
+# Deploy local
+.actions-runner/

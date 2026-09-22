@@ -1,0 +1,767 @@
+/**
+ * mc.aikex.ink 联机 WebSocket 服务
+ *
+ * 方案（权威在服务端，浏览器只收发）：
+ * 1. 建房 create → 房间码 + 初始 edits（可带本地差分）
+ * 2. 加入 join / 列表 GET /api/rooms
+ * 3. 玩：block / move 广播；sync 拉权威快照（防房主「等待进房」时状态过期）
+ * 4. 落盘 data/rooms.json（进程重启不丢房间差分；仍非 SQL）
+ */
+'use strict';
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const { WebSocketServer } = require('ws');
+const { URL } = require('url');
+
+const PORT = Number(process.env.PORT || 3040);
+const HOST = process.env.HOST || '127.0.0.1';
+const OWNER_KEY = process.env.MC_OWNER_KEY || 'aikex-mc-2026';
+const SEED = 12345;
+const MAX_PLAYERS = 8;
+const MAX_ROOMS = 64;
+const MAX_EDITS = 60000;
+const MOVE_MIN_MS = 50;
+const EMPTY_GRACE_MS = 120_000;
+const PERSIST_PATH = path.join(__dirname, 'data', 'rooms.json');
+const ADMINS_PATH = path.join(__dirname, 'data', 'admins.json');
+const CATALOG_PATH = path.join(__dirname, 'data', 'catalog.json');
+const ADMIN_LOG_PATH = path.join(__dirname, 'data', 'admin.log');
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const COLORS = [0xe57373, 0x64b5f6, 0x81c784, 0xffb74d, 0xba68c8, 0x4dd0e1, 0xfff176, 0xf06292];
+
+function genCode() {
+  let s = '';
+  for (let i = 0; i < 4; i++) s += CODE_CHARS[(Math.random() * CODE_CHARS.length) | 0];
+  return s;
+}
+
+function genId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function cors(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+function json(res, code, obj) {
+  cors(res);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify(obj));
+}
+
+/** @type {Map<string, Room>} */
+const rooms = new Map();
+let persistTimer = null;
+let mobIdSeq = 1;
+
+function nextMobId() {
+  return `M${(mobIdSeq++).toString(36)}`;
+}
+
+class Mob {
+  constructor(kind, x, y, z) {
+    this.id = nextMobId();
+    this.kind = kind; // scout | heavy
+    this.x = x;
+    this.y = y;
+    this.z = z;
+    this.yaw = Math.random() * Math.PI * 2;
+    const HP = { pig:8,cow:12,chicken:4,duck:5,deer:10,horse:16,donkey:14,scout:10,heavy:20,dragon:200 };
+    this.maxHp = HP[kind] || 8;
+    this.hp = this.maxHp;
+    this.speed = kind === 'heavy' ? 0.8 : 1.2;
+    this.dir = Math.random() * Math.PI * 2;
+    this.alive = true;
+  }
+
+  toJSON() {
+    return {
+      id: this.id, kind: this.kind,
+      x: +this.x.toFixed(2), y: +this.y.toFixed(2), z: +this.z.toFixed(2),
+      yaw: +this.yaw.toFixed(3), hp: this.hp, maxHp: this.maxHp,
+    };
+  }
+
+  tick(dt) {
+    if (!this.alive) return;
+    if (Math.random() < dt * 0.4) this.dir += (Math.random() - 0.5) * 1.2;
+    this.x += Math.cos(this.dir) * this.speed * dt;
+    this.z += Math.sin(this.dir) * this.speed * dt;
+    // 圈在出生点附近
+    const cx = 5.4, cz = 22.6;
+    const dx = this.x - cx, dz = this.z - cz;
+    if (dx * dx + dz * dz > 28 * 28) {
+      this.dir = Math.atan2(cz - this.z, cx - this.x);
+    }
+    this.yaw = this.dir;
+  }
+}
+
+class Room {
+  constructor(code, title, hostName) {
+    this.code = code;
+    this.seed = SEED;
+    this.title = title;
+    this.hostName = hostName;
+    this.edits = new Map();
+    this.peers = new Map();
+    this.mobs = new Map();
+    this.createdAt = Date.now();
+    this.lastActive = Date.now();
+    this.emptyAt = 0;
+    this._spawnMobs();
+  }
+
+  _spawnMobs() {
+    const baseY = 18;
+    this.mobs.clear();
+    const kinds = ['pig','cow','chicken','duck','deer','horse','donkey','pig','cow','deer'];
+    for (const kind of kinds) {
+      const a = Math.random() * Math.PI * 2;
+      const d = 5 + Math.random() * 16;
+      const m = new Mob(kind, 5.4 + Math.cos(a) * d, baseY, 22.6 + Math.sin(a) * d);
+      this.mobs.set(m.id, m);
+    }
+  }
+
+  mobsArray() {
+    return [...this.mobs.values()].filter((m) => m.alive).map((m) => m.toJSON());
+  }
+
+  hitMob(id, dmg, byId) {
+    const m = this.mobs.get(id);
+    if (!m || !m.alive) return null;
+    m.hp -= Math.max(1, Math.min(10, dmg | 0 || 3));
+    this.touch();
+    if (m.hp <= 0) {
+      m.alive = false;
+      m.hp = 0;
+      this.mobs.delete(id);
+      return { die: true, mob: m.toJSON(), by: byId };
+    }
+    return { die: false, mob: { ...m.toJSON(), hurt: true }, by: byId };
+  }
+
+  tickMobs(dt) {
+    for (const m of this.mobs.values()) m.tick(dt);
+  }
+
+  touch() {
+    this.lastActive = Date.now();
+    schedulePersist();
+  }
+
+  editsArray() {
+    const arr = [];
+    for (const [k, t] of this.edits) {
+      const p = k.split(',');
+      if (p.length !== 3) continue;
+      arr.push(+p[0], +p[1], +p[2], t | 0);
+    }
+    return arr;
+  }
+
+  applyEditsArray(arr) {
+    if (!Array.isArray(arr)) return;
+    for (let i = 0; i + 3 < arr.length; i += 4) {
+      if (this.edits.size >= MAX_EDITS) break;
+      this.edits.set(`${arr[i] | 0},${arr[i + 1] | 0},${arr[i + 2] | 0}`, arr[i + 3] | 0);
+    }
+  }
+
+  setBlock(x, y, z, b) {
+    if (this.edits.size >= MAX_EDITS && !this.edits.has(`${x},${y},${z}`)) return false;
+    this.edits.set(`${x | 0},${y | 0},${z | 0}`, b | 0);
+    this.touch();
+    return true;
+  }
+
+  playersList(exceptWs = null) {
+    const list = [];
+    for (const [ws, p] of this.peers) {
+      if (ws === exceptWs) continue;
+      list.push({
+        id: p.id, name: p.name, color: p.color,
+        x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+      });
+    }
+    return list;
+  }
+
+  playerNames() {
+    return [...this.peers.values()].map((p) => p.name);
+  }
+
+  snapshotFor(ws) {
+    return {
+      t: 'sync',
+      room: this.code,
+      title: this.title,
+      seed: this.seed,
+      edits: this.editsArray(),
+      players: this.playersList(ws),
+      playersCount: this.peers.size,
+      mobs: this.mobsArray(),
+    };
+  }
+
+  broadcast(obj, exceptWs = null) {
+    const raw = JSON.stringify(obj);
+    for (const [ws] of this.peers) {
+      if (ws === exceptWs) continue;
+      if (ws.readyState === 1) ws.send(raw);
+    }
+  }
+
+  toPublic() {
+    return {
+      code: this.code,
+      title: this.title,
+      host: this.hostName,
+      players: this.peers.size,
+      max: MAX_PLAYERS,
+      names: this.playerNames(),
+      edits: this.edits.size,
+      full: this.peers.size >= MAX_PLAYERS,
+      createdAt: this.createdAt,
+      ageSec: Math.floor((Date.now() - this.createdAt) / 1000),
+    };
+  }
+
+  toPersist() {
+    return {
+      code: this.code,
+      title: this.title,
+      hostName: this.hostName,
+      seed: this.seed,
+      edits: this.editsArray(),
+      createdAt: this.createdAt,
+      lastActive: this.lastActive,
+    };
+  }
+
+  static fromPersist(row) {
+    const room = new Room(row.code, row.title || row.code, row.hostName || 'Host');
+    room.seed = row.seed | 0 || SEED;
+    room.createdAt = row.createdAt || Date.now();
+    room.lastActive = row.lastActive || Date.now();
+    room.applyEditsArray(row.edits);
+    room.emptyAt = Date.now(); // 重启后无人，走宽限
+    return room;
+  }
+}
+
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistNow();
+  }, 800);
+}
+
+function persistNow() {
+  try {
+    const dir = path.dirname(PERSIST_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const payload = {
+      v: 1,
+      savedAt: Date.now(),
+      rooms: [...rooms.values()].map((r) => r.toPersist()),
+    };
+    const tmp = PERSIST_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(payload));
+    fs.renameSync(tmp, PERSIST_PATH);
+  } catch (err) {
+    console.error('[mc-ws] persist fail', err.message);
+  }
+}
+
+function loadPersist() {
+  try {
+    if (!fs.existsSync(PERSIST_PATH)) return;
+    const raw = JSON.parse(fs.readFileSync(PERSIST_PATH, 'utf8'));
+    if (!raw || !Array.isArray(raw.rooms)) return;
+    for (const row of raw.rooms) {
+      if (!row || !row.code) continue;
+      if (rooms.size >= MAX_ROOMS) break;
+      if (rooms.has(row.code)) continue;
+      rooms.set(row.code, Room.fromPersist(row));
+    }
+    console.log(`[mc-ws] loaded ${rooms.size} rooms from disk`);
+  } catch (err) {
+    console.error('[mc-ws] load persist fail', err.message);
+  }
+}
+
+function listPublicRooms() {
+  return [...rooms.values()]
+    .filter((r) => r.peers.size > 0)
+    .sort((a, b) => b.lastActive - a.lastActive)
+    .map((r) => r.toPublic());
+}
+
+function send(ws, obj) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+
+function leaveRoom(ws) {
+  const peer = ws._peer;
+  if (!peer || !peer.room) return;
+  const room = peer.room;
+  const wasHost = peer.name === room.hostName;
+  room.peers.delete(ws);
+  room.broadcast({ t: 'bye', id: peer.id });
+  peer.room = null;
+  if (room.peers.size === 0) {
+    room.emptyAt = Date.now();
+    console.log(`[mc-ws] room ${room.code} empty, grace ${EMPTY_GRACE_MS / 1000}s`);
+    schedulePersist();
+  } else if (wasHost) {
+    const next = room.peers.values().next().value;
+    if (next) room.hostName = next.name;
+    schedulePersist();
+  }
+}
+
+function findFreeCode() {
+  for (let i = 0; i < 40; i++) {
+    const c = genCode();
+    if (!rooms.has(c)) return c;
+  }
+  return null;
+}
+
+function joinRoom(ws, room, name) {
+  if (room.peers.size >= MAX_PLAYERS) {
+    send(ws, { t: 'err', msg: '房间已满（最多 8 人）' });
+    return;
+  }
+  leaveRoom(ws);
+  room.emptyAt = 0;
+  const id = genId();
+  const color = COLORS[room.peers.size % COLORS.length];
+  const peer = {
+    id,
+    name: (name || '玩家').slice(0, 12),
+    color,
+    x: 5.4, y: 22, z: 22.6, yaw: 0, pitch: -0.3,
+    room, lastMove: 0,
+  };
+  ws._peer = peer;
+  room.peers.set(ws, peer);
+  room.touch();
+  console.log(`[mc-ws] join ${room.code} as ${peer.name} (${room.peers.size}/${MAX_PLAYERS})`);
+
+  send(ws, {
+    t: 'joined',
+    room: room.code,
+    title: room.title,
+    id,
+    seed: room.seed,
+    color,
+    edits: room.editsArray(),
+    players: room.playersList(ws),
+    mobs: room.mobsArray(),
+  });
+  room.broadcast({
+    t: 'peer',
+    id, name: peer.name, color,
+    x: peer.x, y: peer.y, z: peer.z, yaw: peer.yaw, pitch: peer.pitch,
+  }, ws);
+}
+
+loadPersist();
+
+function adminLog(line) {
+  const row = `[${new Date().toISOString()}] ${line}\n`;
+  console.log('[admin]', line);
+  try { fs.appendFileSync(ADMIN_LOG_PATH, row); } catch { /* */ }
+}
+
+function loadAdmins() {
+  try {
+    if (!fs.existsSync(ADMINS_PATH)) return { version: 1, admins: [] };
+    return JSON.parse(fs.readFileSync(ADMINS_PATH, 'utf8')) || { version: 1, admins: [] };
+  } catch {
+    return { version: 1, admins: [] };
+  }
+}
+
+function saveAdmins(data) {
+  const dir = path.dirname(ADMINS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(ADMINS_PATH, JSON.stringify(data, null, 2));
+}
+
+function loadCatalog() {
+  try {
+    return JSON.parse(fs.readFileSync(CATALOG_PATH, 'utf8'));
+  } catch {
+    return { version: 1, mobs: [], items: [], structures: [] };
+  }
+}
+
+function saveCatalog(data) {
+  fs.writeFileSync(CATALOG_PATH, JSON.stringify(data, null, 2));
+}
+
+function genToken() {
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+}
+
+/** @returns {'owner'|'admin'|null} */
+function resolveRole(key, name) {
+  if (key && key === OWNER_KEY) return 'owner';
+  const data = loadAdmins();
+  const hit = (data.admins || []).find((a) =>
+    (key && a.token === key) || (name && a.name === name)
+  );
+  return hit ? 'admin' : null;
+}
+
+function publicAdmins() {
+  return (loadAdmins().admins || []).map((a) => ({
+    name: a.name,
+    token: a.token,
+    role: 'admin',
+  }));
+}
+
+const server = http.createServer((req, res) => {
+  if (req.method === 'OPTIONS') {
+    cors(res);
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  let pathname = '/';
+  try {
+    pathname = new URL(req.url || '/', `http://${HOST}`).pathname;
+  } catch { /* */ }
+
+  if (pathname === '/health' || pathname === '/api/health') {
+    json(res, 200, {
+      ok: true,
+      rooms: rooms.size,
+      open: listPublicRooms().length,
+      persist: PERSIST_PATH,
+      admin: true,
+    });
+    return;
+  }
+
+  if (pathname === '/api/rooms' || pathname === '/rooms') {
+    json(res, 200, {
+      ok: true,
+      ts: Date.now(),
+      rooms: listPublicRooms(),
+    });
+    return;
+  }
+
+  if (pathname === '/api/catalog') {
+    json(res, 200, loadCatalog());
+    return;
+  }
+
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('mc-ws');
+});
+
+const wss = new WebSocketServer({ server, path: '/ws' });
+
+wss.on('connection', (ws) => {
+  ws._peer = null;
+
+  ws.on('message', (buf) => {
+    let msg;
+    try {
+      msg = JSON.parse(String(buf));
+    } catch {
+      return;
+    }
+    if (!msg || typeof msg.t !== 'string') return;
+
+    if (msg.t === 'ping') {
+      send(ws, { t: 'pong', ts: Date.now() });
+      return;
+    }
+
+    // —— 管理鉴权（可不在房间内）——
+    if (msg.t === 'admin_auth') {
+      const role = resolveRole(String(msg.key || ''), String(msg.name || ''));
+      if (!role) {
+        adminLog(`auth FAIL from ${msg.name || '?'}`);
+        send(ws, { t: 'err', msg: '密钥无效' });
+        return;
+      }
+      ws._adminRole = role;
+      ws._adminKey = String(msg.key || '');
+      let token;
+      if (role === 'admin') {
+        const hit = (loadAdmins().admins || []).find((a) => a.token === msg.key || a.name === msg.name);
+        token = hit?.token;
+      }
+      adminLog(`auth OK role=${role} name=${msg.name || '-'}`);
+      send(ws, {
+        t: 'admin_ok',
+        role,
+        token,
+        admins: role === 'owner' ? publicAdmins() : undefined,
+      });
+      return;
+    }
+
+    if (msg.t === 'admin_cmd') {
+      const key = String(msg.key || ws._adminKey || '');
+      let role = ws._adminRole || resolveRole(key, ws._peer?.name || '');
+      // 房主对本房有限权限：刷怪
+      if (!role && ws._peer?.room && msg.cmd === 'spawn'
+          && ws._peer.name === ws._peer.room.hostName) {
+        role = 'admin';
+      }
+      if (!role) {
+        adminLog(`cmd DENY ${msg.cmd}`);
+        send(ws, { t: 'err', msg: '无管理权限' });
+        return;
+      }
+      ws._adminRole = role;
+
+      if (msg.cmd === 'op_list') {
+        if (role !== 'owner') {
+          send(ws, { t: 'err', msg: '仅站长可查看' });
+          return;
+        }
+        send(ws, { t: 'admin_ok', admins: publicAdmins() });
+        return;
+      }
+
+      if (msg.cmd === 'op_grant') {
+        if (role !== 'owner') {
+          send(ws, { t: 'err', msg: '仅站长可授权' });
+          return;
+        }
+        const name = String(msg.name || '').trim().slice(0, 12);
+        if (!name) {
+          send(ws, { t: 'err', msg: '昵称无效' });
+          return;
+        }
+        const data = loadAdmins();
+        data.admins = data.admins || [];
+        let row = data.admins.find((a) => a.name === name);
+        if (!row) {
+          row = { name, token: genToken(), role: 'admin', at: Date.now() };
+          data.admins.push(row);
+        } else {
+          row.token = row.token || genToken();
+        }
+        saveAdmins(data);
+        adminLog(`OP grant ${name} token=${row.token.slice(0, 8)}`);
+        send(ws, { t: 'admin_ok', admins: publicAdmins(), granted: row });
+        return;
+      }
+
+      if (msg.cmd === 'op_revoke') {
+        if (role !== 'owner') {
+          send(ws, { t: 'err', msg: '仅站长可收回' });
+          return;
+        }
+        const name = String(msg.name || '').trim();
+        const data = loadAdmins();
+        data.admins = (data.admins || []).filter((a) => a.name !== name);
+        saveAdmins(data);
+        adminLog(`OP revoke ${name}`);
+        send(ws, { t: 'admin_ok', admins: publicAdmins() });
+        return;
+      }
+
+      if (msg.cmd === 'catalog_add') {
+        const entry = msg.entry;
+        if (!entry || !entry.id || !entry.label) {
+          send(ws, { t: 'err', msg: '条目无效' });
+          return;
+        }
+        const cat = loadCatalog();
+        cat.mobs = cat.mobs || [];
+        const i = cat.mobs.findIndex((m) => m.id === entry.id);
+        if (i >= 0) cat.mobs[i] = entry;
+        else cat.mobs.push(entry);
+        saveCatalog(cat);
+        adminLog(`catalog add ${entry.id}`);
+        send(ws, { t: 'admin_ok', catalog: cat });
+        return;
+      }
+
+      if (msg.cmd === 'spawn') {
+        const peer = ws._peer;
+        const room = peer?.room;
+        if (!room) {
+          send(ws, { t: 'admin_ok', note: 'local_only' });
+          return;
+        }
+        const kind = String(msg.kind || 'pig');
+        // 在房内广播，让各客户端本地刷一只（位置用发起者坐标）
+        room.broadcast({
+          t: 'admin_spawn',
+          kind,
+          x: peer.x, y: peer.y, z: peer.z,
+          by: peer.id,
+        });
+        adminLog(`spawn ${kind} in ${room.code} by ${peer.name}`);
+        send(ws, { t: 'admin_ok', ok: true });
+        return;
+      }
+
+      send(ws, { t: 'err', msg: `未知指令 ${msg.cmd}` });
+      return;
+    }
+
+    if (msg.t === 'create') {
+      if (rooms.size >= MAX_ROOMS) {
+        send(ws, { t: 'err', msg: '服务器房间已满，稍后再试' });
+        return;
+      }
+      const code = findFreeCode();
+      if (!code) {
+        send(ws, { t: 'err', msg: '无法分配房间码' });
+        return;
+      }
+      const name = String(msg.name || '玩家').slice(0, 12);
+      const title = String(msg.title || `${name} 的世界`).slice(0, 24);
+      const room = new Room(code, title, name);
+      room.applyEditsArray(msg.edits);
+      rooms.set(code, room);
+      console.log(`[mc-ws] create ${code} "${title}" by ${name}`);
+      joinRoom(ws, room, name);
+      schedulePersist();
+      return;
+    }
+
+    if (msg.t === 'join') {
+      const code = String(msg.room || '').toUpperCase().trim();
+      const room = rooms.get(code);
+      if (!room) {
+        send(ws, { t: 'err', msg: '房间不存在或已关闭' });
+        return;
+      }
+      joinRoom(ws, room, msg.name);
+      return;
+    }
+
+    const peer = ws._peer;
+    if (!peer || !peer.room) {
+      send(ws, { t: 'err', msg: '请先加入房间' });
+      return;
+    }
+    const room = peer.room;
+
+    if (msg.t === 'sync') {
+      send(ws, room.snapshotFor(ws));
+      return;
+    }
+
+    if (msg.t === 'hit') {
+      const result = room.hitMob(String(msg.id || ''), msg.dmg | 0 || 3, peer.id);
+      if (!result) return;
+      if (result.die) {
+        const DROP = { pig:[100,100], cow:[101,101], chicken:[102], duck:[106], deer:[103,103], horse:[104,104], donkey:[105,105], scout:[12,12], heavy:[10,3] };
+        room.broadcast({ t: 'mob_die', id: result.mob.id, by: peer.id, drops: DROP[result.mob.kind] || [100] });
+      } else {
+        room.broadcast({ t: 'mob', ...result.mob });
+      }
+      return;
+    }
+
+    if (msg.t === 'block') {
+      const x = msg.x | 0, y = msg.y | 0, z = msg.z | 0, b = msg.b | 0;
+      if (y < 0 || y >= 48) return;
+      if (!room.setBlock(x, y, z, b)) {
+        send(ws, { t: 'err', msg: '改动过多，无法继续同步' });
+        return;
+      }
+      room.broadcast({ t: 'block', x, y, z, b, by: peer.id }, ws);
+      return;
+    }
+
+    if (msg.t === 'move') {
+      const now = Date.now();
+      if (now - peer.lastMove < MOVE_MIN_MS) return;
+      peer.lastMove = now;
+      peer.x = +msg.x || 0;
+      peer.y = +msg.y || 0;
+      peer.z = +msg.z || 0;
+      peer.yaw = +msg.yaw || 0;
+      peer.pitch = +msg.pitch || 0;
+      room.touch();
+      room.broadcast({
+        t: 'move', id: peer.id,
+        x: peer.x, y: peer.y, z: peer.z, yaw: peer.yaw, pitch: peer.pitch,
+      }, ws);
+      return;
+    }
+
+    if (msg.t === 'name') {
+      peer.name = String(msg.name || peer.name).slice(0, 12);
+      if (room.hostName === peer.name || room.peers.size === 1) room.hostName = peer.name;
+      room.broadcast({
+        t: 'peer', id: peer.id, name: peer.name, color: peer.color,
+        x: peer.x, y: peer.y, z: peer.z, yaw: peer.yaw, pitch: peer.pitch,
+      }, ws);
+      schedulePersist();
+    }
+  });
+
+  ws.on('close', () => leaveRoom(ws));
+  ws.on('error', () => leaveRoom(ws));
+});
+
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const [code, room] of rooms) {
+    if (room.peers.size === 0 && room.emptyAt && now - room.emptyAt > EMPTY_GRACE_MS) {
+      rooms.delete(code);
+      changed = true;
+      console.log(`[mc-ws] GC room ${code}`);
+    }
+  }
+  if (changed) schedulePersist();
+  for (const client of wss.clients) {
+    if (client.readyState === 1) {
+      try { client.ping(); } catch { /* */ }
+    }
+  }
+}, 15_000);
+
+// 生物 AI + 位置广播（约 5Hz）
+setInterval(() => {
+  for (const room of rooms.values()) {
+    if (room.peers.size === 0) continue;
+    room.tickMobs(0.2);
+    room.broadcast({ t: 'mobs', list: room.mobsArray() });
+  }
+}, 200);
+
+process.on('SIGINT', () => { persistNow(); process.exit(0); });
+process.on('SIGTERM', () => { persistNow(); process.exit(0); });
+
+server.listen(PORT, HOST, () => {
+  console.log(`[mc-ws] http://${HOST}:${PORT}/api/rooms  ws://${HOST}:${PORT}/ws`);
+  console.log(`[mc-ws] persist → ${PERSIST_PATH}`);
+});
+
+function selfCheck() {
+  const r = new Room('TEST', '自检房', 'Host');
+  r.setBlock(1, 2, 3, 4);
+  console.assert(r.editsArray()[3] === 4, 'edits');
+  console.assert(genCode().length === 4, 'code');
+  console.assert(Array.isArray(listPublicRooms()), 'list');
+  console.assert(r.snapshotFor(null).t === 'sync', 'sync');
+  console.log('[mc-ws] self-check ok');
+}
+selfCheck();

@@ -1,0 +1,359 @@
+/**
+ * 主世界：猪/牛/鸡/鸭/鹿/马/驴（可击杀掉肉）
+ * 地狱：敌对侦察机
+ */
+import * as THREE from 'three';
+import { BlockType, isSolid, Dim } from './voxel.js?v=lobby10';
+import { ItemType } from './items.js?v=lobby10';
+
+const SPAWN_RADIUS = 28;
+const MIN_SPAWN_DIST = 4;
+const WANDER_RANGE = 22;
+
+function randRange(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+let _idSeq = 1;
+function nextLocalId() {
+  return `L${(_idSeq++).toString(36)}`;
+}
+
+/** 生物定义 */
+export const CritterDefs = {
+  pig:     { name: '猪', hp: 8,  w: 0.8, h: 0.85, color: 0xf0a0a8, speed: 1.3, drop: ItemType.PORK, dropN: 2 },
+  cow:     { name: '牛', hp: 12, w: 0.95, h: 1.15, color: 0x5d4037, speed: 1.0, drop: ItemType.BEEF, dropN: 2 },
+  chicken: { name: '鸡', hp: 4,  w: 0.45, h: 0.55, color: 0xfff3e0, speed: 1.6, drop: ItemType.CHICKEN, dropN: 1 },
+  duck:    { name: '鸭', hp: 5,  w: 0.5, h: 0.55, color: 0x8d6e63, speed: 1.4, drop: ItemType.DUCK, dropN: 1 },
+  deer:    { name: '鹿', hp: 10, w: 0.7, h: 1.2, color: 0xa1887f, speed: 2.0, drop: ItemType.VENISON, dropN: 2 },
+  horse:   { name: '马', hp: 16, w: 0.9, h: 1.4, color: 0x6d4c41, speed: 2.2, drop: ItemType.HORSE_MEAT, dropN: 2 },
+  donkey:  { name: '驴', hp: 14, w: 0.85, h: 1.25, color: 0x8d6e63, speed: 1.8, drop: ItemType.DONKEY_MEAT, dropN: 2 },
+  scout:   { name: '地狱机', hp: 10, w: 0.7, h: 1.0, color: 0xb0b8c0, speed: 1.5, drop: BlockType.NETHERRACK, dropN: 2, hostile: true },
+};
+
+class Critter {
+  constructor(scene, world, kind, x, y, z, opts = {}) {
+    const def = CritterDefs[kind] || CritterDefs.pig;
+    this.def = def;
+    this.kind = kind;
+    this.scene = scene;
+    this.world = world;
+    this.id = opts.id || nextLocalId();
+    this.position = new THREE.Vector3(x, y, z);
+    this.rotation = opts.yaw != null ? opts.yaw : randRange(0, Math.PI * 2);
+    this.targetRotation = this.rotation;
+    this.collisionWidth = def.w;
+    this.collisionHeight = def.h;
+    this.maxHp = opts.maxHp || def.hp;
+    this.hp = opts.hp != null ? opts.hp : this.maxHp;
+    this.hurtTimer = 0;
+    this.dead = false;
+    this._netDriven = !!opts.netDriven;
+    this.wanderSpeed = def.speed;
+    this.turnSpeed = 3;
+    this.state = 'idle';
+    this.stateTimer = randRange(1, 3);
+    this.wanderDir = new THREE.Vector3(1, 0, 0);
+    this.bobPhase = Math.random() * 6;
+
+    this.group = new THREE.Group();
+    this.group.position.copy(this.position);
+    this._buildModel(def);
+    this.scene.add(this.group);
+    this._baseMats = [];
+    this.group.traverse((o) => {
+      if (o.isMesh && o.material?.color) {
+        this._baseMats.push({ mat: o.material, hex: o.material.color.getHex() });
+      }
+    });
+  }
+
+  _buildModel(def) {
+    const mat = new THREE.MeshLambertMaterial({ color: def.color });
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(def.w * 0.95, def.h * 0.55, def.w * 1.1),
+      mat
+    );
+    body.position.y = def.h * 0.45;
+    this.group.add(body);
+    const head = new THREE.Mesh(
+      new THREE.BoxGeometry(def.w * 0.5, def.h * 0.4, def.w * 0.5),
+      mat
+    );
+    head.position.set(0, def.h * 0.85, def.w * 0.45);
+    this.group.add(head);
+    if (this.kind === 'deer' || this.kind === 'cow') {
+      const horn = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.35, 0.08), new THREE.MeshLambertMaterial({ color: 0xeeeeee }));
+      horn.position.set(0.12, def.h * 1.05, def.w * 0.4);
+      this.group.add(horn);
+    }
+    if (this.kind === 'chicken' || this.kind === 'duck') {
+      const beak = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.08, 0.2), new THREE.MeshLambertMaterial({ color: 0xff9800 }));
+      beak.position.set(0, def.h * 0.85, def.w * 0.7);
+      this.group.add(beak);
+    }
+  }
+
+  _getGroundY(wx, wz) {
+    for (let wy = 47; wy >= 0; wy--) {
+      const b = this.world.getBlock(Math.floor(wx), wy, Math.floor(wz));
+      if (isSolid(b) && b !== BlockType.LEAVES) return wy + 1;
+    }
+    return 0;
+  }
+
+  _isSafeStep(wx, wy, wz) {
+    const below = this.world.getBlock(Math.floor(wx), Math.floor(wy) - 1, Math.floor(wz));
+    if (!isSolid(below) || below === BlockType.LEAVES) return false;
+    if (this.world.getBlock(Math.floor(wx), Math.floor(wy), Math.floor(wz)) === BlockType.WATER) return false;
+    if (Math.abs(this._getGroundY(wx, wz) - wy) > 2) return false;
+    return true;
+  }
+
+  hitDistance(origin, dir, maxDist) {
+    if (this.dead) return Infinity;
+    const hw = this.collisionWidth / 2;
+    const min = { x: this.position.x - hw, y: this.position.y, z: this.position.z - hw };
+    const max = { x: this.position.x + hw, y: this.position.y + this.collisionHeight, z: this.position.z + hw };
+    let tmin = 0, tmax = maxDist;
+    for (const axis of ['x', 'y', 'z']) {
+      const o = origin[axis], d = dir[axis];
+      if (Math.abs(d) < 1e-8) {
+        if (o < min[axis] || o > max[axis]) return Infinity;
+        continue;
+      }
+      let t1 = (min[axis] - o) / d, t2 = (max[axis] - o) / d;
+      if (t1 > t2) { const t = t1; t1 = t2; t2 = t; }
+      tmin = Math.max(tmin, t1);
+      tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return Infinity;
+    }
+    return tmin >= 0 ? tmin : Infinity;
+  }
+
+  takeDamage(amount = 3) {
+    if (this.dead) return null;
+    this.hp -= amount;
+    this.hurtTimer = 0.35;
+    this.state = 'flee';
+    this.stateTimer = 1.6;
+    this.targetRotation += Math.PI + randRange(-0.5, 0.5);
+    if (this.hp <= 0) {
+      this.hp = 0;
+      this.dead = true;
+      const drops = [];
+      for (let i = 0; i < (this.def.dropN || 1); i++) drops.push(this.def.drop);
+      return { dead: true, drops };
+    }
+    return { dead: false, drops: [] };
+  }
+
+  applyNetPose(x, y, z, yaw, hp) {
+    this.position.set(x, y, z);
+    if (yaw != null) { this.rotation = yaw; this.targetRotation = yaw; }
+    if (hp != null) this.hp = hp;
+    this.group.position.set(x, y, z);
+    this.group.rotation.y = this.rotation;
+  }
+
+  update(dt, spawnCenter) {
+    if (this.dead) return;
+    dt = Math.min(dt, 0.1);
+    if (this.hurtTimer > 0) {
+      this.hurtTimer -= dt;
+      for (const { mat, hex } of this._baseMats) {
+        mat.color.setHex(this.hurtTimer > 0 ? 0xff4444 : hex);
+      }
+    }
+    if (this._netDriven) return;
+
+    this.stateTimer -= dt;
+    this.bobPhase += dt * (this.state === 'idle' ? 2 : 6);
+
+    if (this.state === 'flee' || this.state === 'wander') {
+      const step = this.wanderSpeed * (this.state === 'flee' ? 1.8 : 1) * dt;
+      const dir = this.state === 'flee'
+        ? new THREE.Vector3(Math.cos(this.targetRotation), 0, Math.sin(this.targetRotation))
+        : this.wanderDir;
+      const nx = this.position.x + dir.x * step;
+      const nz = this.position.z + dir.z * step;
+      const ny = this._getGroundY(nx, nz);
+      const dist = Math.hypot(nx - spawnCenter.x, nz - spawnCenter.z);
+      if (this._isSafeStep(nx, ny, nz) && dist < WANDER_RANGE) {
+        this.position.set(nx, ny, nz);
+        this.targetRotation = Math.atan2(dir.z, dir.x);
+      } else {
+        this.targetRotation += randRange(0.6, 1.4);
+        this.wanderDir.set(Math.cos(this.targetRotation), 0, Math.sin(this.targetRotation));
+      }
+      if (this.stateTimer <= 0) {
+        this.state = this.state === 'flee' ? 'wander' : 'idle';
+        this.stateTimer = randRange(1, 4);
+      }
+    } else if (this.stateTimer <= 0) {
+      this.state = 'wander';
+      this.stateTimer = randRange(2, 5);
+      this.wanderDir.set(Math.cos(this.targetRotation), 0, Math.sin(this.targetRotation));
+    }
+
+    let short = ((this.targetRotation - this.rotation + Math.PI) % (Math.PI * 2)) - Math.PI;
+    this.rotation += short * Math.min(this.turnSpeed * dt, 1);
+    this.group.rotation.y = this.rotation;
+    const bob = this.state !== 'idle' ? Math.sin(this.bobPhase) * 0.03 : 0;
+    this.group.position.set(this.position.x, this.position.y + bob, this.position.z);
+  }
+
+  toNet() {
+    return {
+      id: this.id, kind: this.kind,
+      x: +this.position.x.toFixed(2), y: +this.position.y.toFixed(2), z: +this.position.z.toFixed(2),
+      yaw: +this.rotation.toFixed(3), hp: this.hp, maxHp: this.maxHp,
+    };
+  }
+
+  dispose() {
+    if (!this.group) return;
+    this.group.traverse((c) => {
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) c.material.dispose();
+    });
+    this.scene.remove(this.group);
+    this.group = null;
+  }
+}
+
+export class AnimalManager {
+  constructor(scene, world, isMobile = false) {
+    this.scene = scene;
+    this.world = world;
+    this.isMobile = isMobile;
+    this.robots = []; // 兼容旧字段名
+    this.spawnCenter = new THREE.Vector3(5.4, 0, 22.6);
+    this._spawned = false;
+    this._netMode = false;
+  }
+
+  get animals() { return this.robots; }
+
+  clearAll() {
+    for (const r of this.robots) r.dispose();
+    this.robots = [];
+    this._spawned = false;
+  }
+
+  spawnAnimals(dimension = Dim.OVERWORLD) {
+    if (this._spawned || this._netMode) return;
+    this._spawned = true;
+    if (dimension === Dim.END) return;
+    if (dimension === Dim.NETHER) {
+      this._spawnKinds(['scout', 'scout', 'scout', 'scout'], 8, 20);
+      return;
+    }
+    const kinds = this.isMobile
+      ? ['pig', 'cow', 'chicken', 'deer']
+      : ['pig', 'pig', 'cow', 'cow', 'chicken', 'duck', 'deer', 'deer', 'horse', 'donkey'];
+    this._spawnKinds(kinds, 5, SPAWN_RADIUS);
+  }
+
+  /** 管理：在指定坐标刷一只 */
+  spawnOne(kind, x, y, z, opts = {}) {
+    const k = CritterDefs[kind] ? kind : 'pig';
+    const bot = new Critter(this.scene, this.world, k, x, y, z, opts);
+    this.robots.push(bot);
+    this._spawned = true;
+    return bot;
+  }
+
+  clearNear(x, z, radius = 32) {
+    const keep = [];
+    for (const r of this.robots) {
+      const d = Math.hypot(r.position.x - x, r.position.z - z);
+      if (d <= radius) r.dispose();
+      else keep.push(r);
+    }
+    this.robots = keep;
+  }
+
+  _spawnKinds(kinds, minDist, radius) {
+    const used = [];
+    for (const kind of kinds) {
+      for (let a = 0; a < 40; a++) {
+        const ang = Math.random() * Math.PI * 2;
+        const dist = randRange(minDist, radius);
+        const sx = this.spawnCenter.x + Math.cos(ang) * dist;
+        const sz = this.spawnCenter.z + Math.sin(ang) * dist;
+        const gy = this._getGroundY(sx, sz);
+        const ground = this.world.getBlock(Math.floor(sx), Math.floor(gy - 1), Math.floor(sz));
+        if (ground !== BlockType.GRASS && ground !== BlockType.SAND && ground !== BlockType.NETHERRACK && ground !== BlockType.END_STONE) continue;
+        if (gy < 1 || gy > 40) continue;
+        if (used.some((p) => Math.hypot(sx - p.x, sz - p.z) < MIN_SPAWN_DIST)) continue;
+        used.push({ x: sx, z: sz });
+        this.robots.push(new Critter(this.scene, this.world, kind, sx, gy, sz));
+        break;
+      }
+    }
+  }
+
+  _getGroundY(wx, wz) {
+    for (let wy = 47; wy >= 0; wy--) {
+      const b = this.world.getBlock(Math.floor(wx), wy, Math.floor(wz));
+      if (isSolid(b) && b !== BlockType.LEAVES) return wy + 1;
+    }
+    return 1;
+  }
+
+  syncFromNet(list) {
+    this._netMode = true;
+    this._spawned = true;
+    const keep = new Set((list || []).map((m) => m.id));
+    for (const r of [...this.robots]) {
+      if (!keep.has(r.id)) { r.dispose(); this.robots = this.robots.filter((x) => x !== r); }
+    }
+    for (const m of (list || [])) {
+      let bot = this.robots.find((r) => r.id === m.id);
+      if (!bot) {
+        bot = new Critter(this.scene, this.world, m.kind || 'pig', m.x, m.y, m.z, {
+          id: m.id, hp: m.hp, maxHp: m.maxHp, netDriven: true,
+        });
+        this.robots.push(bot);
+      }
+      bot._netDriven = true;
+      bot.applyNetPose(m.x, m.y, m.z, m.yaw, m.hp);
+    }
+  }
+
+  upsertNetMob(m) {
+    this._netMode = true;
+    let bot = this.robots.find((r) => r.id === m.id);
+    if (!bot) {
+      bot = new Critter(this.scene, this.world, m.kind || 'pig', m.x, m.y, m.z, {
+        id: m.id, hp: m.hp, maxHp: m.maxHp, netDriven: true,
+      });
+      this.robots.push(bot);
+    }
+    bot.applyNetPose(m.x, m.y, m.z, m.yaw, m.hp);
+    if (m.hurt) bot.hurtTimer = 0.35;
+  }
+
+  removeById(id) {
+    const bot = this.robots.find((r) => r.id === id);
+    if (!bot) return;
+    bot.dispose();
+    this.robots = this.robots.filter((r) => r !== bot);
+  }
+
+  raycast(origin, dir, maxDist) {
+    let best = null, bestT = maxDist;
+    for (const r of this.robots) {
+      const t = r.hitDistance(origin, dir, maxDist);
+      if (t < bestT) { bestT = t; best = r; }
+    }
+    return best ? { robot: best, dist: bestT } : null;
+  }
+
+  update(dt) {
+    for (const r of this.robots) r.update(dt, this.spawnCenter);
+  }
+
+  dispose() { this.clearAll(); }
+}

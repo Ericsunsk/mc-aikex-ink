@@ -4,21 +4,21 @@
  */
 
 import * as THREE from 'three';
-import { Combat } from './combat.js?v=lobby13';
+import { Combat } from './combat.js?v=lobby14';
 import {
   World, Chunk, BlockType, BlockNames, isSolid, Dim,
   CHUNK_SIZE, CHUNK_HEIGHT, RENDER_DISTANCE, getBlockColor, getBreakDrop,
   isMobileDevice, getRenderDistance,
-} from './voxel.js?v=lobby13';
-import { AnimalManager } from './animals.js?v=lobby13';
-import { SaveManager } from './save.js?v=lobby13';
-import { NetClient, RemotePlayers } from './net.js?v=lobby13';
-import { Inventory } from './inventory.js?v=lobby13';
-import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby13';
-import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby13';
-import { EnderDragon } from './dragon.js?v=lobby13';
-import { AdminPanel } from './admin-panel.js?v=lobby13';
-import { buildStructure } from './structures.js?v=lobby13';
+} from './voxel.js?v=lobby14';
+import { AnimalManager } from './animals.js?v=lobby14';
+import { SaveManager } from './save.js?v=lobby14';
+import { NetClient, RemotePlayers } from './net.js?v=lobby14';
+import { Inventory } from './inventory.js?v=lobby14';
+import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby14';
+import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby14';
+import { EnderDragon } from './dragon.js?v=lobby14';
+import { AdminPanel } from './admin-panel.js?v=lobby14';
+import { buildStructure } from './structures.js?v=lobby14';
 import { apiUrl } from './config.js';
 
 /* ============================================
@@ -39,19 +39,29 @@ class Player {
 
     // 物理参数
     this.gravity = -25;
-    this.jumpSpeed = 12;
-    this.moveSpeed = 5.5;
+    this.jumpSpeed = 9.2;       // 略低，更稳
+    this.moveSpeed = 4.8;       // 步行
+    this.sprintMul = 1.45;      // Shift 冲刺
     this.onGround = false;
 
     // 玩家碰撞体尺寸
     this.width = 0.6;
     this.height = 1.75;
-    this.eyeHeight = 1.6;
+    this.eyeHeight = 1.62;
 
     // 输入状态
     this.keys = {};
     this.mouseDX = 0;
     this.mouseDY = 0;
+
+    // 视角手感
+    this.lookSens = 0.00215;
+    this.viewKickP = 0;
+    this.viewKickY = 0;
+    this.shakeAmp = 0;
+    this._bob = 0;
+    this._landPunch = 0;
+    this._sprinting = false;
 
     // 交互参数
     this.reachDistance = 7;
@@ -72,12 +82,17 @@ class Player {
     this.adminFly = false;
   }
 
+  addShake(amp) {
+    this.shakeAmp = Math.min(0.08, (this.shakeAmp || 0) + amp);
+  }
+
   /** 处理鼠标移动（视角旋转） */
   onMouseMove(dx, dy) {
-    const sensitivity = 0.002;
-    this.yaw -= dx * sensitivity;
-    this.pitch -= dy * sensitivity;
-    // 限制俯仰角范围
+    let sens = this.lookSens;
+    // 开镜/持枪略降灵敏度
+    if (this._armedLook) sens *= 0.72;
+    this.yaw -= dx * sens;
+    this.pitch -= dy * sens;
     this.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, this.pitch));
   }
 
@@ -112,9 +127,15 @@ class Player {
       moveDir.normalize();
     }
 
+    const wantSprint = !!(this.keys['ShiftLeft'] || this.keys['ShiftRight'])
+      && !this.adminFly
+      && (this.keys['KeyW'] || this.keys['ArrowUp']);
+    this._sprinting = wantSprint && this.onGround && moveDir.lengthSq() > 0;
+    const speed = this.moveSpeed * (this._sprinting ? this.sprintMul : 1) * (this.adminFly ? 1.8 : 1);
+
     // 水平移动
-    this.velocity.x = moveDir.x * this.moveSpeed * (this.adminFly ? 1.8 : 1);
-    this.velocity.z = moveDir.z * this.moveSpeed * (this.adminFly ? 1.8 : 1);
+    this.velocity.x = moveDir.x * speed;
+    this.velocity.z = moveDir.z * speed;
 
     // 管理飞行：空格上升，Shift 下降，无重力
     if (this.adminFly) {
@@ -125,21 +146,7 @@ class Player {
       this.position.y += this.velocity.y * dt;
       this.position.z += this.velocity.z * dt;
       this.onGround = false;
-      this.camera.position.set(
-        this.position.x,
-        this.position.y + this.eyeHeight,
-        this.position.z
-      );
-      const lookDir = new THREE.Vector3(
-        -Math.sin(this.yaw) * Math.cos(this.pitch),
-        Math.sin(this.pitch),
-        -Math.cos(this.yaw) * Math.cos(this.pitch)
-      );
-      this.camera.lookAt(
-        this.camera.position.x + lookDir.x,
-        this.camera.position.y + lookDir.y,
-        this.camera.position.z + lookDir.z
-      );
+      this._applyCamera(0);
       this._raycast();
       return;
     }
@@ -202,6 +209,7 @@ class Player {
 
     // 摔落伤害（落地瞬间）
     if (!this._wasOnGround && this.onGround && !inWater) {
+      this._landPunch = Math.min(0.22, 0.04 + Math.max(0, -this._fallVy) * 0.012);
       const dmg = Math.floor((-this._fallVy - 12) / 2);
       if (dmg > 0 && this.invuln <= 0) {
         this.hp = Math.max(0, this.hp - dmg);
@@ -212,27 +220,54 @@ class Player {
     if (!this.onGround) this._fallVy = this.velocity.y;
     else this._fallVy = 0;
 
-    // 更新相机
+    // 走路晃动
+    const moving = Math.hypot(this.velocity.x, this.velocity.z) > 0.4 && this.onGround;
+    if (moving) this._bob += dt * (this._sprinting ? 14 : 10);
+    else this._bob *= 0.9;
+    this._landPunch *= Math.exp(-dt * 14);
+
+    this._applyCamera(dt);
+
+    // 射线检测（目标方块）
+    this._raycast();
+  }
+
+  /** 第一人称相机：眼睛高度 + 走路晃动 + 后坐力/震动 */
+  _applyCamera(dt) {
+    const bobY = Math.sin(this._bob) * (this._sprinting ? 0.055 : 0.035);
+    const bobX = Math.cos(this._bob * 0.5) * (this._sprinting ? 0.03 : 0.018);
+    const land = this._landPunch;
+
+    // 后坐力衰减
+    this.viewKickP *= Math.exp(-(dt || 0.016) * 9);
+    this.viewKickY *= Math.exp(-(dt || 0.016) * 9);
+    this.shakeAmp *= Math.exp(-(dt || 0.016) * 10);
+    const sh = this.shakeAmp;
+    const sx = (Math.random() - 0.5) * sh;
+    const sy = (Math.random() - 0.5) * sh;
+
+    const yaw = this.yaw + this.viewKickY + sx;
+    const pitch = Math.max(
+      -Math.PI / 2 + 0.01,
+      Math.min(Math.PI / 2 - 0.01, this.pitch + this.viewKickP + sy)
+    );
+
     this.camera.position.set(
-      this.position.x,
-      this.position.y + this.eyeHeight,
+      this.position.x + bobX,
+      this.position.y + this.eyeHeight + bobY - land,
       this.position.z
     );
 
-    // 更新相机朝向
     const lookDir = new THREE.Vector3(
-      -Math.sin(this.yaw) * Math.cos(this.pitch),
-      Math.sin(this.pitch),
-      -Math.cos(this.yaw) * Math.cos(this.pitch)
+      -Math.sin(yaw) * Math.cos(pitch),
+      Math.sin(pitch),
+      -Math.cos(yaw) * Math.cos(pitch)
     );
     this.camera.lookAt(
       this.camera.position.x + lookDir.x,
       this.camera.position.y + lookDir.y,
       this.camera.position.z + lookDir.z
     );
-
-    // 射线检测（目标方块）
-    this._raycast();
   }
 
   /**
@@ -981,13 +1016,15 @@ class Game {
     // 初始化机器人生成管理器
     this.animalManager = new AnimalManager(this.scene, this.world, this.isMobile);
 
-    // 相机：移动端更广视角（90°），桌面端默认（75°）
-    this.defaultFov = this.isMobile ? 90 : 75;
+    // 相机：更接近真人视野；持枪/冲刺会动态微调
+    this.defaultFov = this.isMobile ? 80 : 70;
     this.fov = this.defaultFov;
-    this.fovMin = 15;
-    this.fovMax = 130;
+    this.fovMin = 40;
+    this.fovMax = 110;
+    this._fovPunch = 0;
+    this._fovTargetBoost = 0;
     this.camera = new THREE.PerspectiveCamera(
-      this.fov, window.innerWidth / window.innerHeight, 0.1, 1000
+      this.fov, window.innerWidth / window.innerHeight, 0.08, 1000
     );
   }
 
@@ -2468,15 +2505,38 @@ class Game {
 
   /** 调整视野角度（FOV） */
   _adjustFOV(delta) {
-    this.fov = Math.max(this.fovMin, Math.min(this.fovMax, this.fov + delta));
-    this.camera.fov = this.fov;
-    this.camera.updateProjectionMatrix();
+    this.defaultFov = Math.max(this.fovMin, Math.min(this.fovMax, this.defaultFov + delta));
+    this._applyFovNow();
     this._showFOVHint();
   }
 
   /** 重置视野到默认值 */
   _resetFOV() {
-    this._adjustFOV(this.defaultFov - this.fov);
+    this.defaultFov = this.isMobile ? 80 : 70;
+    this._fovPunch = 0;
+    this._fovTargetBoost = 0;
+    this._applyFovNow();
+    this._showFOVHint();
+  }
+
+  /** 持枪等瞬时 FOV 目标偏移 */
+  _punchFov(boost) {
+    this._fovTargetBoost = boost || 0;
+  }
+
+  _applyFovNow() {
+    if (!this.camera) return;
+    const sprint = this.player?._sprinting ? 5 : 0;
+    const next = this.defaultFov + (this._fovPunch || 0) + sprint;
+    this.fov = next;
+    this.camera.fov = next;
+    this.camera.updateProjectionMatrix();
+  }
+
+  _tickFov(dt) {
+    const want = (this._fovTargetBoost || 0);
+    this._fovPunch = (this._fovPunch || 0) + (want - (this._fovPunch || 0)) * Math.min(1, dt * 8);
+    this._applyFovNow();
   }
 
   /** 短暂显示 FOV 提示 */
@@ -2563,6 +2623,8 @@ class Game {
     }
 
     this.combat?.tick();
+    if (this.player) this.player._armedLook = !!this.combat?.armed;
+    this._tickFov(dt);
     if (this.remotes) this.remotes.update(dt, this.camera, this.dimension);
 
     if (this.animalManager) this.animalManager.update(dt);

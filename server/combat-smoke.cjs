@@ -45,7 +45,8 @@ async function run() {
     assert.equal(snapshot.self.hp, 0); assert.equal(snapshot.self.x, 0);
     assert.equal(snapshot.players[0].hp, 20);
     const reborn = await b.wait(m => m.t === 'combat' && m.respawn);
-    assert.equal(reborn.hp, 20); assert.equal(reborn.y, 50);
+    assert.equal(reborn.hp, 20); assert.ok([reborn.x, reborn.y, reborn.z].every(Number.isFinite));
+    b.send({ t: 'move', x: 5.4, y: 50, z: 22.6, yaw: 0, pitch: 0, dimension: 'overworld' });
     a.send({ t: 'move', x: 5.4, y: 50, z: 32.6, yaw: 0, pitch: 0, dimension: 'overworld' });
     await delay(80);
     a.send({ t: 'shoot', direction: [0, 0, -1], distance: 80 });

@@ -2,7 +2,9 @@
 
 开源体素沙盒：单机存档、联机房间、地狱/末地、末影龙、管理面板。
 
-**在线试玩：** https://mc.aikex.ink/
+**正式试玩：** https://mc.aikex.ink/  
+**GitHub Pages 预览：** https://aiyangdie.github.io/mc-aikex-ink/  
+（Pages 只能托管静态页；联机自动连回 `mc.aikex.ink`。推 `main` 两边都会更新。）
 
 ## 技术栈
 

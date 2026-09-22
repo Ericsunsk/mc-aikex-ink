@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { isSolid } from './voxel.js?v=lobby10';
+import { isSolid } from './voxel.js?v=mage2';
 
 export class Mage {
   constructor(game) {
@@ -58,7 +58,7 @@ export class Mage {
   }
   teleport(to) {
     const p = this.game.player;
-    p.position.set(...to); p.velocity.set(0,0,0); p._fallVy = 0;
+    p.position.set(...to); p.velocity.set(0,0,0); p.knockVelocity?.set(0,0,0); p._fallVy = 0;
     this.game.camera.position.set(p.position.x, p.position.y + p.eyeHeight, p.position.z);
     document.body.classList.add('mage-blink');
     setTimeout(() => document.body.classList.remove('mage-blink'), 180);

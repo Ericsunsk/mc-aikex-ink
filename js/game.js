@@ -18,6 +18,7 @@ import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.j
 import { EnderDragon } from './dragon.js?v=lobby10';
 import { AdminPanel } from './admin-panel.js?v=lobby10';
 import { buildStructure } from './structures.js?v=lobby10';
+import { apiUrl } from './config.js';
 
 /* ============================================
    玩家类 - 第一人称角色控制
@@ -2216,7 +2217,7 @@ class Game {
 
   async _probeService() {
     try {
-      const r = await fetch(`/api/health?t=${Date.now()}`, { cache: 'no-store' });
+      const r = await fetch(apiUrl(`/api/health?t=${Date.now()}`), { cache: 'no-store' });
       this._setServiceStatus(r.ok);
       if (!r.ok) this._setOnlineStatus('联机服务异常', true);
     } catch {

@@ -1,6 +1,8 @@
 /**
  * 联机客户端：房间码建房/加入，同步方块与玩家位置
  */
+import { apiUrl, wsUrl } from './config.js';
+
 export class NetClient {
   constructor() {
     this.ws = null;
@@ -26,8 +28,7 @@ export class NetClient {
     if (this.ws && (this.ws.readyState === 0 || this.ws.readyState === 1)) {
       return Promise.resolve();
     }
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const url = `${proto}://${location.host}/ws`;
+    const url = wsUrl();
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
@@ -185,7 +186,7 @@ export class NetClient {
 
   /** 拉取公开房间列表（真实在线人） */
   static async fetchRooms() {
-    const r = await fetch(`/api/rooms?t=${Date.now()}`, { cache: 'no-store' });
+    const r = await fetch(apiUrl(`/api/rooms?t=${Date.now()}`), { cache: 'no-store' });
     if (!r.ok) throw new Error(`房间列表失败 HTTP ${r.status}`);
     const data = await r.json();
     if (!data || !data.ok || !Array.isArray(data.rooms)) throw new Error('房间数据异常');

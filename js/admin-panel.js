@@ -2,6 +2,8 @@
  * 管理面板：传送 / 给物 / 刷怪 / 飞行 / 授权 / 自定义目录
  * 打开：按 `（反引号）
  */
+import { apiUrl } from './config.js';
+
 const AUTH_KEY = 'voxel-admin-key';
 const AUTH_TOKEN = 'voxel-admin-token';
 
@@ -174,7 +176,7 @@ export class AdminPanel {
 
   async reloadCatalog() {
     try {
-      const r = await fetch(`/api/catalog?t=${Date.now()}`, { cache: 'no-store' });
+      const r = await fetch(apiUrl(`/api/catalog?t=${Date.now()}`), { cache: 'no-store' });
       if (r.ok) this.catalog = await r.json();
     } catch { /* */ }
     if (!this.catalog) {

@@ -4,22 +4,22 @@
  */
 
 import * as THREE from 'three';
-import { Combat } from './combat.js?v=lobby16';
+import { Combat } from './combat.js?v=mage3';
 import {
   World, Chunk, BlockType, BlockNames, isSolid, Dim,
   CHUNK_SIZE, CHUNK_HEIGHT, RENDER_DISTANCE, getBlockColor, getBreakDrop,
   isMobileDevice, getRenderDistance,
-} from './voxel.js?v=lobby16';
-import { AnimalManager } from './animals.js?v=lobby16';
-import { SaveManager } from './save.js?v=lobby16';
-import { NetClient, RemotePlayers } from './net.js?v=lobby16';
-import { Inventory } from './inventory.js?v=lobby16';
-import { isFood, isItem, getItemName, getItemColor, getFoodHeal, ItemType } from './items.js?v=lobby16';
-import { BombManager, isBomb } from './bombs.js?v=lobby16';
-import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby16';
-import { EnderDragon } from './dragon.js?v=lobby16';
-import { AdminPanel } from './admin-panel.js?v=lobby16';
-import { buildStructure } from './structures.js?v=lobby16';
+} from './voxel.js?v=mage3';
+import { AnimalManager } from './animals.js?v=mage3';
+import { SaveManager } from './save.js?v=mage3';
+import { NetClient, RemotePlayers } from './net.js?v=mage3';
+import { Inventory } from './inventory.js?v=mage3';
+import { isFood, isItem, getItemName, getItemColor, getFoodHeal, ItemType } from './items.js?v=mage3';
+import { BombManager, isBomb } from './bombs.js?v=mage3';
+import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=mage3';
+import { EnderDragon } from './dragon.js?v=mage3';
+import { AdminPanel } from './admin-panel.js?v=mage3';
+import { buildStructure } from './structures.js?v=mage3';
 import { apiUrl } from './config.js';
 
 /* ============================================
@@ -1904,6 +1904,8 @@ class Game {
   _bindNet() {
     this.net.on('combat', msg => this.combat?.receive(msg));
     this.net.on('shot', msg => this.combat?.trace(msg));
+    this.net.on('fireball', msg => this.combat?.mage.receive(msg));
+    this.net.on('fire', msg => this.combat?.mage.receive(msg));
     this.net.on('block', (msg) => {
       if (msg.by === this.net.id) return;
       this._netApplying = true;
@@ -1932,6 +1934,7 @@ class Game {
       if (this._online || this._hostWaiting) {
         this._online = false;
         this._hostWaiting = false;
+        this.combat?.mage.clear();
         this._showSaveToast('联机已断开');
         this._setOnlineStatus('联机连接断开，请重新建房/加入', true);
         this._hideWaitingPanel();
@@ -2066,6 +2069,11 @@ class Game {
 
   /** 用房间差分覆盖本地世界 */
   _applyRoomState(msg) {
+    if (this.combat) {
+      this.combat.mage.clear();
+      for (const spell of [...(msg.spells?.projectiles || []), ...(msg.spells?.fires || [])]) this.combat.mage.receive(spell);
+      this.net._send({t:'mode',mode:this.combat.mode});
+    }
     if (msg.self) this.combat?.receive(msg.self);
     this.world.edits = SaveManager.arrayToEdits(msg.edits || []);
     for (const [, chunk] of this.world.chunks) {

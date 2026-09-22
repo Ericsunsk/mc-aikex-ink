@@ -25,9 +25,8 @@ test('nearest player, damage, fire rate, death, respawn and protection', () => {
     spots.add(`${b.x},${b.z}`);
   }
   assert.ok(spots.size >= 5, `expected varied spawns, got ${spots.size}`);
-  // 刚复活有保护：最后一次 respawn @ 10019 → protectedUntil 12019
-  assert.equal(combat.hurt(b, 5, 11000), false);
-  assert.equal(combat.hurt(b, 5, 12020), true);
+  assert.equal(combat.hurt(b, 5, b.protectedUntil - 1), false);
+  assert.equal(combat.hurt(b, 5, b.protectedUntil + 1), true);
 });
 test('misses, terrain occlusion distance, dimensions and invalid input', () => {
   const a = player('a', 0), b = player('b', -10);

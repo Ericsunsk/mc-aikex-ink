@@ -4,7 +4,7 @@
  */
 
 import * as THREE from 'three';
-import { Combat } from './combat.js?v=combat2';
+import { Combat } from './combat.js?v=mage1';
 import {
   World, Chunk, BlockType, BlockNames, isSolid, Dim,
   CHUNK_SIZE, CHUNK_HEIGHT, RENDER_DISTANCE, getBlockColor, getBreakDrop,
@@ -12,7 +12,7 @@ import {
 } from './voxel.js?v=lobby10';
 import { AnimalManager } from './animals.js?v=lobby10';
 import { SaveManager } from './save.js?v=lobby10';
-import { NetClient, RemotePlayers } from './net.js?v=combat2';
+import { NetClient, RemotePlayers } from './net.js?v=mage1';
 import { Inventory } from './inventory.js?v=lobby10';
 import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby10';
 import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby10';
@@ -1801,6 +1801,8 @@ class Game {
   _bindNet() {
     this.net.on('combat', msg => this.combat?.receive(msg));
     this.net.on('shot', msg => this.combat?.trace(msg));
+    this.net.on('fireball', msg => this.combat?.mage.receive(msg));
+    this.net.on('fire', msg => this.combat?.mage.receive(msg));
     this.net.on('block', (msg) => {
       if (msg.by === this.net.id) return;
       this._netApplying = true;
@@ -1829,6 +1831,7 @@ class Game {
       if (this._online || this._hostWaiting) {
         this._online = false;
         this._hostWaiting = false;
+        this.combat?.mage.clear();
         this._showSaveToast('联机已断开');
         this._setOnlineStatus('联机连接断开，请重新建房/加入', true);
         this._hideWaitingPanel();
@@ -1963,6 +1966,11 @@ class Game {
 
   /** 用房间差分覆盖本地世界 */
   _applyRoomState(msg) {
+    if (this.combat) {
+      this.combat.mage.clear();
+      for (const spell of [...(msg.spells?.projectiles || []), ...(msg.spells?.fires || [])]) this.combat.mage.receive(spell);
+      this.net._send({t:'mode',mode:this.combat.mode});
+    }
     if (msg.self) this.combat?.receive(msg.self);
     this.world.edits = SaveManager.arrayToEdits(msg.edits || []);
     for (const [, chunk] of this.world.chunks) {

@@ -1,7 +1,7 @@
 'use strict';
 const HP = 20, DAMAGE = 5, INTERVAL = 120, RESPAWN = 3000, RANGE = 80;
 function init(p) {
-  Object.assign(p, { hp: HP, maxHp: HP, deadUntil: 0, protectedUntil: 0, lastShot: -Infinity, dimension: 'overworld' });
+  Object.assign(p, { mode: 'ak', hp: HP, maxHp: HP, deadUntil: 0, protectedUntil: 0, lastShot: -Infinity, dimension: 'overworld' });
 }
 function state(p) {
   return { id: p.id, hp: p.hp, maxHp: HP, deadUntil: p.deadUntil, dimension: p.dimension,

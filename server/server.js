@@ -11,6 +11,7 @@
 
 const http = require('http');
 const combat = require('./combat.cjs');
+const { Spells } = require('./mage.cjs');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
@@ -111,6 +112,7 @@ class Room {
     this.edits = new Map();
     this.peers = new Map();
     this.mobs = new Map();
+    this.spells = new Spells();
     this.createdAt = Date.now();
     this.lastActive = Date.now();
     this.emptyAt = 0;
@@ -200,6 +202,7 @@ class Room {
   snapshotFor(ws) {
     return {
       t: 'sync',
+      spells: this.spells.snapshot(Date.now()),
       self: this.peers.has(ws) ? combat.state(this.peers.get(ws)) : null,
       room: this.code,
       title: this.title,
@@ -361,6 +364,7 @@ function joinRoom(ws, room, name) {
 
   send(ws, {
     t: 'joined',
+    spells: room.spells.snapshot(Date.now()),
     self: combat.state(peer),
     room: room.code,
     title: room.title,
@@ -682,7 +686,23 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (msg.t === 'mode') {
+      if (peer.hp > 0 && ['build', 'ak', 'mage'].includes(msg.mode)) peer.mode = msg.mode;
+      return;
+    }
+    if (msg.t === 'fireball') {
+      const ball = room.spells.cast(peer, msg, Date.now());
+      if (ball) room.broadcast(ball);
+      return;
+    }
+    if (msg.t === 'blink') {
+      if (room.spells.blink(peer, msg, Date.now())) {
+        room.broadcast({ t: 'combat', ...combat.state(peer), teleport: true });
+      }
+      return;
+    }
     if (msg.t === 'shoot') {
+      if (peer.mode !== 'ak') return;
       const shot = combat.shoot(peer, room.peers.values(), msg, Date.now());
       if (!shot) return;
       room.broadcast({ t: 'shot', by: peer.id, dimension: peer.dimension,
@@ -782,6 +802,7 @@ setInterval(() => {
     for (const peer of room.peers.values()) {
       if (combat.respawn(peer, Date.now())) room.broadcast({ t: 'combat', ...combat.state(peer), respawn: true });
     }
+    room.spells.tick(room.peers.values(), Date.now(), msg => room.broadcast(msg));
     room.tickMobs(0.2);
     room.broadcast({ t: 'mobs', list: room.mobsArray() });
   }

@@ -4,20 +4,21 @@
  */
 
 import * as THREE from 'three';
+import { Combat } from './combat.js?v=lobby13';
 import {
   World, Chunk, BlockType, BlockNames, isSolid, Dim,
   CHUNK_SIZE, CHUNK_HEIGHT, RENDER_DISTANCE, getBlockColor, getBreakDrop,
   isMobileDevice, getRenderDistance,
-} from './voxel.js?v=lobby12';
-import { AnimalManager } from './animals.js?v=lobby12';
-import { SaveManager } from './save.js?v=lobby12';
-import { NetClient, RemotePlayers } from './net.js?v=lobby12';
-import { Inventory } from './inventory.js?v=lobby12';
-import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby12';
-import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby12';
-import { EnderDragon } from './dragon.js?v=lobby12';
-import { AdminPanel } from './admin-panel.js?v=lobby12';
-import { buildStructure } from './structures.js?v=lobby12';
+} from './voxel.js?v=lobby13';
+import { AnimalManager } from './animals.js?v=lobby13';
+import { SaveManager } from './save.js?v=lobby13';
+import { NetClient, RemotePlayers } from './net.js?v=lobby13';
+import { Inventory } from './inventory.js?v=lobby13';
+import { isFood, isItem, getItemName, getItemColor, getFoodHeal } from './items.js?v=lobby13';
+import { tryLightPortal, standingInPortal, spawnReturnPortal } from './portals.js?v=lobby13';
+import { EnderDragon } from './dragon.js?v=lobby13';
+import { AdminPanel } from './admin-panel.js?v=lobby13';
+import { buildStructure } from './structures.js?v=lobby13';
 import { apiUrl } from './config.js';
 
 /* ============================================
@@ -1102,10 +1103,28 @@ class Game {
     });
   }
 
+  _controlsActive() {
+    return this.isRunning && (this.isPointerLocked || this._fallbackActive || this.isMobile);
+  }
+
+  _pauseFallback() {
+    this._fallbackActive = false;
+    this._lockPending = false;
+    this._lookDrag = null;
+    this.player.keys = {};
+    if (this.combat) this.combat.held = false;
+    this.ui.pauseScreen.style.display = 'flex';
+    this._showGameUI(false);
+    this._persist('auto');
+  }
+
   /** 绑定事件监听 */
   _initEvents() {
     // 键盘事件（桌面端 + 移动端外接键盘通用）
     document.addEventListener('keydown', (e) => {
+      if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable) return;
+      if (e.code === 'Escape' && this._fallbackActive) { this._pauseFallback(); return; }
+      if (!this._controlsActive()) return;
       this.player.keys[e.code] = true;
 
       // 数字键选择热栏 1-9
@@ -1158,15 +1177,34 @@ class Game {
 
     // 鼠标移动（仅桌面端指针锁定后）
     document.addEventListener('mousemove', (e) => {
-      if (!this.isPointerLocked) return;
-      this.player.onMouseMove(e.movementX, e.movementY);
+      if (this.isPointerLocked) this.player.onMouseMove(e.movementX, e.movementY);
+      else if (this._fallbackActive && this._lookDrag) {
+        const dx = e.clientX - this._lookDrag.x, dy = e.clientY - this._lookDrag.y;
+        this._lookDrag.distance += Math.abs(dx) + Math.abs(dy);
+        this._lookDrag.x = e.clientX; this._lookDrag.y = e.clientY;
+        this.player.onMouseMove(dx, dy);
+      }
     });
 
     // 鼠标：左键攻击/破坏，右键放置（对标我的世界）
     document.addEventListener('mousedown', (e) => {
-      if (!this.isPointerLocked) return;
+      if (!this._controlsActive() || (!this.isPointerLocked && e.target !== this.canvas)) return;
+      if (this._fallbackActive && e.button === 2) {
+        this._lookDrag = { x: e.clientX, y: e.clientY, distance: 0 }; return;
+      }
       if (e.button === 0) this._primaryAction();
       else if (e.button === 2) this._secondaryAction();
+    });
+
+    document.addEventListener('mouseup', (e) => {
+      if (e.button !== 2 || !this._lookDrag) return;
+      const click = this._lookDrag.distance < 4;
+      this._lookDrag = null;
+      if (click && this._fallbackActive && e.target === this.canvas) this._secondaryAction();
+    });
+    window.addEventListener('blur', () => {
+      this.player.keys = {};
+      if (this._fallbackActive) this._pauseFallback();
     });
 
     // 禁用右键菜单
@@ -1174,7 +1212,7 @@ class Game {
 
     // 滚轮切换方块（仅桌面端指针锁定后）
     document.addEventListener('wheel', (e) => {
-      if (!this.isPointerLocked) return;
+      if (!this._controlsActive() || (!this.isPointerLocked && e.target !== this.canvas)) return;
 
       // Ctrl + 滚轮 / 触控板双指缩放 → 调整视野
       // 捏合(deltaY>0) = 缩小画面 = 视野变广(FOV变大)；推开(deltaY<0) = 放大画面 = 视野变窄(FOV变小)
@@ -1196,19 +1234,37 @@ class Game {
       document.addEventListener('pointerlockchange', () => {
         this.isPointerLocked = document.pointerLockElement === this.canvas;
         if (this.isPointerLocked) {
+          this._lockPending = false;
+          this._fallbackActive = false;
           this.ui.pauseScreen.style.display = 'none';
           this._showGameUI(true);
         } else if (this.isRunning) {
+          this.player.keys = {};
           this.ui.pauseScreen.style.display = 'flex';
           this._persist('auto'); // 暂停时自动存
         }
       });
 
-      const requestLock = () => {
-        if (!this.isPointerLocked && this.isRunning) {
-          this.canvas.requestPointerLock();
-        }
+      const fallback = () => {
+        if (!this._lockPending || !this.isRunning || this.isPointerLocked) return;
+        this._lockPending = false;
+        this._pointerFallback = true;
+        this._fallbackActive = true;
+        this.ui.pauseScreen.style.display = 'none';
+        this._showGameUI(true);
       };
+      document.addEventListener('pointerlockerror', fallback);
+      const requestLock = () => {
+        if (this.isPointerLocked || !this.isRunning || this._lockPending) return;
+        this._lockPending = true;
+        if (this._pointerFallback || !this.canvas.requestPointerLock) { fallback(); return; }
+        try {
+          const pending = this.canvas.requestPointerLock();
+          pending?.catch(fallback);
+          setTimeout(fallback, 1200);
+        } catch { fallback(); }
+      };
+
 
       // 开始/继续由按钮触发，见 _initSaveUI
       this._requestLock = requestLock;
@@ -1270,6 +1326,8 @@ class Game {
 
   /** 左键：优先打怪，否则破坏方块 */
   _primaryAction() {
+    if (this.player.hp <= 0) return;
+    if (this.combat?.armed) { this.combat.shoot(); return; }
     if (!this.isRunning) return;
     this._refreshEntityTarget();
     if (this.player.targetMob && this.player.attackCooldown <= 0) {
@@ -1290,6 +1348,7 @@ class Game {
 
   /** 右键：食物则吃；否则放置 */
   _secondaryAction() {
+    if (this.player.hp <= 0 || this.combat?.armed) return;
     if (!this.isRunning) return;
     const type = this.inventory.selectedType(this.selectedSlot);
     if (!type) {
@@ -1312,6 +1371,7 @@ class Game {
   }
 
   _eatSelected() {
+    if (this.player.hp <= 0) return;
     const type = this.inventory.selectedType(this.selectedSlot);
     if (!isFood(type)) return;
     if (this.player.hp >= this.player.maxHp) {
@@ -1598,11 +1658,12 @@ class Game {
   }
 
   _ensureHud() {
+    if (!this.combat) this.combat = new Combat(this);
     if (document.getElementById('hpHud')) return;
     const el = document.createElement('div');
     el.id = 'hpHud';
     el.style.display = 'none';
-    el.innerHTML = '<span class="hp-label">❤</span><span id="hpHearts"></span>';
+    el.innerHTML = '<span class="hp-label">❤</span><progress id="hpBar" max="20" value="20"></progress><span id="hpHearts"></span>';
     document.body.appendChild(el);
     this._updateHpHud();
   }
@@ -1611,6 +1672,8 @@ class Game {
     const hearts = document.getElementById('hpHearts');
     if (!hearts || !this.player) return;
     const hp = Math.max(0, Math.ceil(this.player.hp));
+    const bar = document.getElementById('hpBar');
+    if (bar) bar.value = hp;
     hearts.textContent = `${hp} / ${this.player.maxHp}`;
     hearts.style.color = hp <= 4 ? '#ff5252' : '#fff';
   }
@@ -1780,6 +1843,8 @@ class Game {
 
   /** 联机事件绑定 */
   _bindNet() {
+    this.net.on('combat', msg => this.combat?.receive(msg));
+    this.net.on('shot', msg => this.combat?.trace(msg));
     this.net.on('block', (msg) => {
       if (msg.by === this.net.id) return;
       this._netApplying = true;
@@ -1942,6 +2007,7 @@ class Game {
 
   /** 用房间差分覆盖本地世界 */
   _applyRoomState(msg) {
+    if (msg.self) this.combat?.receive(msg.self);
     this.world.edits = SaveManager.arrayToEdits(msg.edits || []);
     for (const [, chunk] of this.world.chunks) {
       this.world.generateChunkData(chunk);
@@ -2484,24 +2550,20 @@ class Game {
     }
 
     // 桌面端指针锁定 或 移动端运行时更新游戏逻辑
-    if (this.isPointerLocked || (this.isMobile && this.isRunning)) {
-      this.player.update(dt);
+    if (this._controlsActive()) {
+      if (this.player.hp > 0) this.player.update(dt);
+      this.player.dimension = this.dimension;
       this.world.update(this.player.position.x, this.player.position.z);
       this.highlight.update(this.player.targetBlock);
       this._refreshEntityTarget();
       this._updateHpHud();
-      this._tickPortal(dt);
-      if (this._online && this.net) this.net.tickMove(dt, this.player);
-      if (this.player.hp <= 0) {
-        this.player.hp = this.player.maxHp;
-        if (this.dimension === Dim.END) this.player.position.set(0, 24, 0);
-        else if (this.dimension === Dim.NETHER) this.player.position.set(21, 16, 8);
-        else this.player.position.set(this._spawnX || 5.4, (this._spawnY || 20) + 2, this._spawnZ || 22.6);
-        this._showSaveToast('你倒下了，已复活');
-      }
+      if (this.player.hp > 0) this._tickPortal(dt);
+      if (this._online && this.net && this.player.hp > 0) this.net.tickMove(dt, this.player);
+
     }
 
-    if (this.remotes) this.remotes.update(dt, this.camera);
+    this.combat?.tick();
+    if (this.remotes) this.remotes.update(dt, this.camera, this.dimension);
 
     if (this.animalManager) this.animalManager.update(dt);
     if (this._dragon) this._dragon.update(dt);

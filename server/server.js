@@ -10,6 +10,7 @@
 'use strict';
 
 const http = require('http');
+const combat = require('./combat.cjs');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
@@ -185,7 +186,7 @@ class Room {
     for (const [ws, p] of this.peers) {
       if (ws === exceptWs) continue;
       list.push({
-        id: p.id, name: p.name, color: p.color,
+        ...combat.state(p), name: p.name, color: p.color,
         x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
       });
     }
@@ -199,6 +200,7 @@ class Room {
   snapshotFor(ws) {
     return {
       t: 'sync',
+      self: this.peers.has(ws) ? combat.state(this.peers.get(ws)) : null,
       room: this.code,
       title: this.title,
       seed: this.seed,
@@ -351,6 +353,7 @@ function joinRoom(ws, room, name) {
     x: 5.4, y: 22, z: 22.6, yaw: 0, pitch: -0.3,
     room, lastMove: 0,
   };
+  combat.init(peer);
   ws._peer = peer;
   room.peers.set(ws, peer);
   room.touch();
@@ -358,6 +361,7 @@ function joinRoom(ws, room, name) {
 
   send(ws, {
     t: 'joined',
+    self: combat.state(peer),
     room: room.code,
     title: room.title,
     id,
@@ -369,6 +373,7 @@ function joinRoom(ws, room, name) {
   });
   room.broadcast({
     t: 'peer',
+    ...combat.state(peer),
     id, name: peer.name, color,
     x: peer.x, y: peer.y, z: peer.z, yaw: peer.yaw, pitch: peer.pitch,
   }, ws);
@@ -469,6 +474,18 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (process.env.MC_SERVE_STATIC === '1' && req.method === 'GET') {
+    // Local development only: expose game assets, never server/data or dotfiles.
+    const asset = pathname === '/' ? '/index.html' : pathname;
+    if (/^\/(?:index\.html|(?:js|styles)\/[a-zA-Z0-9_-]+\.(?:js|css))$/.test(asset)) {
+      const file = path.join(__dirname, '..', asset.slice(1));
+      if (fs.existsSync(file)) {
+        const mime = asset.endsWith('.js') ? 'text/javascript' : asset.endsWith('.css') ? 'text/css' : 'text/html';
+        res.writeHead(200, { 'Content-Type': mime + '; charset=utf-8' });
+        fs.createReadStream(file).pipe(res); return;
+      }
+    }
+  }
   res.writeHead(404, { 'Content-Type': 'text/plain' });
   res.end('mc-ws');
 });
@@ -665,6 +682,24 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    if (msg.t === 'shoot') {
+      const shot = combat.shoot(peer, room.peers.values(), msg, Date.now());
+      if (!shot) return;
+      room.broadcast({ t: 'shot', by: peer.id, dimension: peer.dimension,
+        origin: shot.origin, direction: shot.direction, distance: shot.distance });
+      if (shot.target) room.broadcast({ t: 'combat', ...combat.state(shot.target), by: peer.id });
+      return;
+    }
+    // Environmental damage remains client simulated, as in the original game.
+    if (msg.t === 'vitals') {
+      const delta = Number(msg.delta);
+      if (!Number.isFinite(delta) || peer.hp <= 0) return;
+      if (delta < 0) combat.hurt(peer, Math.min(20, -delta), Date.now());
+      else peer.hp = Math.min(20, peer.hp + Math.min(20, delta));
+      room.broadcast({ t: 'combat', ...combat.state(peer) });
+      return;
+    }
+    if (peer.hp <= 0) return;
     if (msg.t === 'hit') {
       const result = room.hitMob(String(msg.id || ''), msg.dmg | 0 || 3, peer.id);
       if (!result) return;
@@ -692,6 +727,8 @@ wss.on('connection', (ws) => {
       const now = Date.now();
       if (now - peer.lastMove < MOVE_MIN_MS) return;
       peer.lastMove = now;
+      if (![msg.x, msg.y, msg.z, msg.yaw, msg.pitch].every(Number.isFinite)) return;
+      peer.dimension = ['overworld', 'nether', 'end'].includes(msg.dimension) ? msg.dimension : 'overworld';
       peer.x = +msg.x || 0;
       peer.y = +msg.y || 0;
       peer.z = +msg.z || 0;
@@ -699,7 +736,7 @@ wss.on('connection', (ws) => {
       peer.pitch = +msg.pitch || 0;
       room.touch();
       room.broadcast({
-        t: 'move', id: peer.id,
+        t: 'move', ...combat.state(peer),
         x: peer.x, y: peer.y, z: peer.z, yaw: peer.yaw, pitch: peer.pitch,
       }, ws);
       return;
@@ -742,6 +779,9 @@ setInterval(() => {
 setInterval(() => {
   for (const room of rooms.values()) {
     if (room.peers.size === 0) continue;
+    for (const peer of room.peers.values()) {
+      if (combat.respawn(peer, Date.now())) room.broadcast({ t: 'combat', ...combat.state(peer), respawn: true });
+    }
     room.tickMobs(0.2);
     room.broadcast({ t: 'mobs', list: room.mobsArray() });
   }
